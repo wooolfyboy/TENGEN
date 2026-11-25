@@ -62,6 +62,13 @@ public class MainActivity extends BridgeActivity {
     }
 
     @Override
+    public void onDestroy() {
+        ui.removeCallbacksAndMessages(null);
+        if (self == this) self = null;
+        super.onDestroy();
+    }
+
+    @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) {
@@ -125,7 +132,8 @@ public class MainActivity extends BridgeActivity {
                 getSharedPreferences(CAP_PREFS, MODE_PRIVATE).edit().putString(CAP_PATH, path).apply();
                 status = "updated " + sha.substring(0, 6);
                 ui.post(() -> {
-                    Toast.makeText(this, "TENGEN: страница обновлена с палки", Toast.LENGTH_SHORT).show();
+                    boolean ru = java.util.Locale.getDefault().getLanguage().startsWith("ru");
+                    Toast.makeText(this, ru ? "TENGEN: страница обновлена с палки" : "TENGEN: page updated from device", Toast.LENGTH_SHORT).show();
                     getBridge().setServerBasePath(path);
                 });
             } catch (Exception e) {
@@ -152,7 +160,7 @@ public class MainActivity extends BridgeActivity {
             ByteArrayOutputStream o = new ByteArrayOutputStream();
             byte[] buf = new byte[16384];
             int n;
-            while ((n = s.read(buf)) > 0) o.write(buf, 0, n);
+            while ((n = s.read(buf)) != -1) { if (n > 0) o.write(buf, 0, n); }
             return o.toByteArray();
         }
     }

@@ -1,14 +1,16 @@
 // ---- app: tabs, subtabs, frame loop, fullscreen ----
 const App = T.app = { cur: null };
 const nav = document.getElementById('nav'), subs = document.getElementById('subs'), main = document.getElementById('main');
+const elBat = document.getElementById('bat'), elRadios = document.getElementById('radios'), elClock = document.getElementById('clock'), elFps = document.getElementById('fps'), elUpd = document.getElementById('upd');
 App.status = () => {
   const s = S.st; if (!s) return;
-  document.getElementById('bat').textContent = s.bat >= 0 ? 'BAT ' + s.bat + '%' + (s.usb ? ' ⚡' : '') : '';
+  elBat.textContent = s.bat >= 0 ? 'BAT ' + s.bat + '%' + (s.usb ? ' ⚡' : '') : '';
   const r = s.radio || '', names = [['b', 'BLE'], ['w', 'WIFI'], ['s', 'SUB'], ['m', 'MIC'], ['p', 'PC'], ['i', 'IR'], ['n', 'NFC']];
-  document.getElementById('radios').innerHTML = names.map(([k, n]) => `<i class="${r.includes(k) ? 'on' : ''}">${n}</i>`).join('');
+  elRadios.innerHTML = names.map(([k, n]) => `<i class="${r.includes(k) ? 'on' : ''}">${n}</i>`).join('');
 };
 
-setInterval(() => { const d = new Date(); document.getElementById('clock').textContent = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }, 1000);
+const updClock = () => { const d = new Date(); elClock.textContent = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
+updClock(); setInterval(updClock, 10000);
 App.renderSubs = () => {
   const v = App.cur; subs.innerHTML = '';
   document.body.classList.toggle('hassubs', !!(v.subs && v.subs.length));
@@ -80,14 +82,16 @@ App.adapt = fps => {
 const SHOT = new URLSearchParams(location.search).has('shot');
 // diagnostics (fps, app update status) only with ?debug or Settings > Actions > Show FPS
 T.debug = new URLSearchParams(location.search).has('debug');
-const applyFps = on => { T.showFps = !!on; document.getElementById('fps').style.display = on && !SHOT ? '' : 'none'; };
+const applyFps = on => { T.showFps = !!on; elFps.style.display = on && !SHOT ? '' : 'none'; };
 T.setShowFps = on => { try { localStorage.setItem('showFps', on ? '1' : '0'); } catch (e) {} applyFps(on); };
 let fpsPref = false; try { fpsPref = localStorage.getItem('showFps') === '1'; } catch (e) {}
 applyFps(T.debug || fpsPref);
-if (!T.debug) document.getElementById('upd').style.display = 'none';   // for README images: all effects, no fps counter
+if (!T.debug) elUpd.style.display = 'none';            // for README images: all effects, no fps counter
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { last = next = performance.now(); App.graceT = last + 1500; } });
 let last = performance.now(), next = last, fpsN = 0, fpsT = 0;
 const loop = now => {
   requestAnimationFrame(loop);
+  if (document.hidden) { last = next = now; return; }  // pause rendering when minimized or screen locked
   if (now < next - 1) return;                          // 120/144 Hz screen: skip extra frames
   next = Math.max(next + STEP, now - STEP);            // fell behind: do not catch up in a burst
   const dt = Math.min(0.1, (now - last) / 1000); last = now;
@@ -96,11 +100,11 @@ const loop = now => {
   fpsN++; fpsT += dt;
   if (fpsT >= 1) {
     const fps = Math.round(fpsN / fpsT); T.fps = fps;
-    if (!document.hidden && !SHOT) App.adapt(fps);
-    document.getElementById('fps').textContent = fps + ' FPS' + (T.RS < 1 ? ' · ' + Math.round(T.RS * 100) + '%' : '') + (T.Q.bloom ? '' : ' · LITE');
+    if (!SHOT) App.adapt(fps);
+    if (T.showFps) elFps.textContent = fps + ' FPS' + (T.RS < 1 ? ' · ' + Math.round(T.RS * 100) + '%' : '') + (T.Q.bloom ? '' : ' · LITE');
     // app: page update state from the stick (diagnostics); tap = check now
-    const UP = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.TengenUpdate;
-    if (UP) UP.status().then(r => { T.updStatus = r.status; const el = document.getElementById('upd'); if (el) el.textContent = 'UPD ' + r.status; }).catch(() => {});
+    const UP = T.debug && window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.TengenUpdate;
+    if (UP) UP.status().then(r => { T.updStatus = r.status; if (elUpd) elUpd.textContent = 'UPD ' + r.status; }).catch(() => {});
     fpsN = 0; fpsT = 0;
   }
   if (T.Stream.mode === 'live' && now - T.Stream.lastMsg > 6000) T.Stream.setLink('off');

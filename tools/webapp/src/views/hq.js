@@ -171,12 +171,12 @@ T.views.push({
     this.wfPanel(g, m, yBot, bw, botH, u, dt);
     this.lvlPanel(g, m * 2 + bw, yBot, w - 3 * m - bw, botH, u, dt, t);
     this.log(g, m, yLog, w - 2 * m, logH, u, t);
-    // scanlines
-    if (!this.scan || this.scan.h !== h) {
+    // scanlines (pattern is fixed 4x3; create once)
+    if (!this.scan) {
       const c = document.createElement('canvas'); c.width = 4; c.height = 3; const q = c.getContext('2d');
-      q.fillStyle = 'rgba(0,0,0,.28)'; q.fillRect(0, 0, 4, 1); this.scan = { p: g.createPattern(c, 'repeat'), h };
+      q.fillStyle = 'rgba(0,0,0,.28)'; q.fillRect(0, 0, 4, 1); this.scan = g.createPattern(c, 'repeat');
     }
-    if (T.Q.scan && !K()) { g.fillStyle = this.scan.p; g.fillRect(0, 0, w, h); }   // KURENAI - flat, no scanlines
+    if (T.Q.scan && !K()) { g.fillStyle = this.scan; g.fillRect(0, 0, w, h); }   // KURENAI - flat, no scanlines
   },
 
   // events: new near device, remote, card
@@ -263,7 +263,8 @@ T.views.push({
   wifiPanel(g, x, y, w, h, u) {
     const y0 = panel(g, x, y, w, h, u, 'WI-FI · 2.4 GHz', '網');
     T.hits.rect(x, y, w, h, { go: 'wifi' });
-    const best = new Float32Array(14).fill(-100);
+    const best = this._wifiBest || (this._wifiBest = new Float32Array(14));
+    best.fill(-100);
     for (const a of S.aps.values()) if (a.alive) { const c = a.c | 0; if (c >= 1 && c <= 13) best[c] = Math.max(best[c], a.rs); }
     const bx = x + u * 0.6, bw = (w - u * 1.2) / 13, bb = y + h - u * 1.4, bh = bb - y0 - u * 0.6, segs = 6, sh = bh / segs;
     for (let c = 1; c <= 13; c++) {

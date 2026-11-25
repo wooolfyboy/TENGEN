@@ -449,6 +449,9 @@ class Link:
             if not chunk:
                 continue
             buf += chunk
+            if len(buf) > 262144 and b"\n" not in buf:
+                buf = b""                                    # guard against corrupted unbounded serial stream
+                continue
             while b"\n" in buf:
                 raw, buf = buf.split(b"\n", 1)
                 line = raw.decode("utf-8", "replace").rstrip("\r")
@@ -470,7 +473,8 @@ class Link:
             self._push(ev, js)
         elif line.startswith("@R "):
             rid, _, js = line[3:].partition(" ")
-            w = self.pending.get(rid)
+            with self.lock:
+                w = self.pending.get(rid)
             if w:
                 w[1] = js
                 w[0].set()
@@ -527,15 +531,21 @@ class Link:
                 self.cv.wait(wait)
             items = list(self.events)
             self.events.clear()
-        # ready JSON, no re-encoding: stick data is inserted as is
-        return "[" + ",".join('["%s",%s]' % (ev, js) for ev, js in items) + "]"
+        out = []
+        for ev, js in items:
+            try:
+                json.loads(js)
+                out.append("[%s,%s]" % (json.dumps(ev), js))
+            except Exception:
+                pass
+        return "[" + ",".join(out) + "]"
 
     def api(self, path, timeout=3.0):
+        w = [threading.Event(), None]
         with self.lock:
             self.req_id += 1
             rid = str(self.req_id)
-        w = [threading.Event(), None]
-        self.pending[rid] = w
+            self.pending[rid] = w
         try:
             if not self.send_line("@Q %s %s" % (rid, path)):
                 return '{"ok":false,"err":"no device on USB"}'
@@ -543,13 +553,17 @@ class Link:
                 return '{"ok":false,"err":"timeout"}'
             return w[1]
         finally:
-            self.pending.pop(rid, None)
+            with self.lock:
+                self.pending.pop(rid, None)
 
     # --- page from the stick (gzip in chunks) ---
     def _page_part(self, rest):
         parts = rest.split(" ")
+        if len(parts) < 2:
+            return
         pid = parts[0]
-        pg = self.pages.get(pid)
+        with self.lock:
+            pg = self.pages.get(pid)
         if pg is None:
             return
         if parts[1] == "begin":
@@ -557,9 +571,12 @@ class Link:
             pg["sha"] = parts[3] if len(parts) > 3 else ""
         elif parts[1] == "end":
             pg["done"].set()
-        else:
-            pg["chunks"][int(parts[1])] = base64.b64decode(parts[2])
-            pg["got"] = sum(len(c) for c in pg["chunks"].values())
+        elif len(parts) >= 3:
+            idx = int(parts[1])
+            data = base64.b64decode(parts[2])
+            old = pg["chunks"].get(idx)
+            pg["chunks"][idx] = data
+            pg["got"] += len(data) - (len(old) if old is not None else 0)
 
     def get_page(self, timeout=60, progress=None, tries=3):
         """Fetch the page; if a chunk got lost (USB-CDC occasionally drops a 64-byte packet,
@@ -577,11 +594,11 @@ class Link:
                 log("страница: не распаковалась (%s) — прошу ещё раз (%d)" % (e, n + 1))
 
     def _get_page_once(self, timeout, progress):
+        pg = {"chunks": {}, "size": 0, "got": 0, "sha": "", "done": threading.Event()}
         with self.lock:
             self.req_id += 1
             pid = str(self.req_id)
-        pg = {"chunks": {}, "size": 0, "got": 0, "sha": "", "done": threading.Event()}
-        self.pages[pid] = pg
+            self.pages[pid] = pg
         try:
             if not self.send_line("@G " + pid):
                 raise Msg("not_on_usb")
@@ -601,7 +618,8 @@ class Link:
                 log("страница: контрольная сумма не совпала (", pg["sha"], ") — показываю как есть")
             return html
         finally:
-            self.pages.pop(pid, None)
+            with self.lock:
+                self.pages.pop(pid, None)
 
 
 # ============================================================
@@ -895,12 +913,12 @@ class App:
                 self.window.load_url(STICK_URL)
             return self.msg
         self.mode_on = "usb"
+        self.busy = True
         self.apply_prefs()
         threading.Thread(target=self._start_usb, daemon=True).start()
         return self.t("usb_find")
 
     def _start_usb(self):
-        self.busy = True
         try:
             t0 = time.time()
             while not self.link.connected():
@@ -982,15 +1000,16 @@ class App:
             v = bool(v)
             if not autostart_set(v):
                 v = autostart_get()                       # failed: show the real state
-        p = dict(self.engine.prefs)
-        if k.startswith("kinds."):
-            kk = dict(p["kinds"])
-            kk[k[6:]] = bool(v)
-            p["kinds"] = kk
-        else:
-            p[k] = v
-        self.engine.set_prefs(p)
-        self.cfg["alerts"] = self.engine.prefs
+        with self.eng_lock:
+            p = dict(self.engine.prefs)
+            if k.startswith("kinds."):
+                kk = dict(p["kinds"])
+                kk[k[6:]] = bool(v)
+                p["kinds"] = kk
+            else:
+                p[k] = v
+            self.engine.set_prefs(p)
+            self.cfg["alerts"] = self.engine.prefs
         cfg_save(self.cfg)
         self.apply_prefs()
         if self.widget and k in ("opacity", "clickthrough", "style"):
@@ -1221,16 +1240,19 @@ def main():
     app.win_fs = bool(pr.get("start_full"))
     app.win_max = bool(pr.get("win_max"))
     rect = [geo.get("x"), geo.get("y"), geo["width"], geo["height"]]
-    save_t = [0.0]
+    save_tmr = [None]
 
     def save_rect_later():
-        t = save_t[0] = time.time()
+        if save_tmr[0] is not None:
+            save_tmr[0].cancel()
 
         def go():
-            time.sleep(1.0)
-            if save_t[0] == t and None not in rect:
+            if None not in rect:
                 app.set_pref("win_rect", list(rect))
-        threading.Thread(target=go, daemon=True).start()
+        tmr = threading.Timer(1.0, go)
+        tmr.daemon = True
+        save_tmr[0] = tmr
+        tmr.start()
 
     def on_moved(x, y):
         if not (app.win_max or app.win_fs):

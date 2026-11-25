@@ -121,6 +121,11 @@ def read_volume():
         return None
     try:
         if _vol_iface is None:
+            try:
+                import comtypes
+                comtypes.CoInitialize()
+            except Exception:
+                pass
             from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
             spk = AudioUtilities.GetSpeakers()
             if hasattr(spk, "EndpointVolume"):           # newer pycaw
@@ -400,6 +405,9 @@ def window_track():
     return "PM\t1\t-1\t-1\t%s\t%s\t%s\n" % (app, screen_text(song, 90), screen_text(artist, 70))
 
 
+_has_playerctl = None
+
+
 def unix_track():
     """macOS: AppleScript (Spotify / Music); Linux: playerctl (MPRIS: any player or browser).
     Return a "PM ..." line for TENGEN, "PM\\n" (nothing playing) or None (method unavailable)."""
@@ -434,10 +442,16 @@ def unix_track():
             return pm(1 if parts[0].strip() == "playing" else 0, pos, dur, app, parts[3], parts[4])
         return "PM\n"
     if IS_LINUX:
+        global _has_playerctl
+        if _has_playerctl is False:
+            return None
         out = run_cmd(["playerctl", "metadata", "--format",
                        "{{status}}\t{{position}}\t{{mpris:length}}\t{{playerName}}\t{{title}}\t{{artist}}"])
         if out is None:
-            return None if run_cmd(["playerctl", "--version"]) is None else "PM\n"
+            if _has_playerctl is None:
+                _has_playerctl = run_cmd(["playerctl", "--version"]) is not None
+            return None if not _has_playerctl else "PM\n"
+        _has_playerctl = True
         parts = out.rstrip("\n").split("\t")
         if len(parts) < 6 or parts[0] not in ("Playing", "Paused"):
             return "PM\n"
@@ -724,6 +738,7 @@ class AudioTap:
                         silent_since = time.time()
                     if time.time() - silent_since > 0.15:
                         data = np.zeros((block, ch), dtype=np.float32)
+                        time.sleep(1.0 / self.FPS)
                     else:
                         time.sleep(0.005)
                         continue
@@ -800,7 +815,17 @@ class AudioTap:
 # Every 6 h fetch fresh orbital elements (TLE) from CelesTrak and send them to the stick once a minute;
 # cached in a file next to the program, so it also works offline.
 SATS = [("ISS", 25544), ("Tiangong", 48274), ("Hubble", 20580)]
-TLE_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tle_cache.txt")
+if os.name == "nt":
+    _CACHE_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "TENGEN")
+elif sys.platform == "darwin":
+    _CACHE_DIR = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "TENGEN")
+else:
+    _CACHE_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config"), "TENGEN")
+try:
+    os.makedirs(_CACHE_DIR, exist_ok=True)
+    TLE_CACHE = os.path.join(_CACHE_DIR, "tle_cache.txt")
+except Exception:
+    TLE_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tle_cache.txt")
 
 
 class Orbits:

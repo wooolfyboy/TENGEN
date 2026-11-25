@@ -37,8 +37,8 @@ def expected(path):
     return out
 
 def decode(cu8):
-    pulses = subprocess.run([sys.executable, os.path.join(HERE, "demod.py"), cu8], capture_output=True, text=True).stdout
-    res = subprocess.run([BIN], input=pulses, capture_output=True, text=True).stdout
+    pulses = subprocess.run([sys.executable, os.path.join(HERE, "demod.py"), cu8], capture_output=True, text=True, check=True).stdout
+    res = subprocess.run([BIN], input=pulses, capture_output=True, text=True, check=True).stdout
     msgs = []
     for line in res.splitlines():
         if line.startswith("MSG "):

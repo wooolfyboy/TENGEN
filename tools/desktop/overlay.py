@@ -260,7 +260,7 @@ class Widget:
         except Exception:
             pass
         self._rect = [x, y, r[2], r[3]]
-        self._save_t = 0
+        self._save_tmr = None
 
     def _loaded(self):
         self.ready = True
@@ -276,6 +276,10 @@ class Widget:
         except Exception as e:
             log("widget drag:", e)
         self.apply_style()
+        try:
+            self.win.evaluate_js("W.pause(%s)" % ("false" if self.shown else "true"))
+        except Exception:
+            pass
 
     def native_drag(self):
         """System drag (like a title bar). WebView2 holds the mouse capture in the window thread and it can only
@@ -319,18 +323,24 @@ class Widget:
         self._save_later()
 
     def _save_later(self):
-        t = time.time()
-        self._save_t = t
+        if self._save_tmr is not None:
+            self._save_tmr.cancel()
 
         def go():
-            time.sleep(1.0)
-            if self._save_t == t:
-                self.app.set_pref("widget_rect", list(self._rect))
-        threading.Thread(target=go, daemon=True).start()
+            self.app.set_pref("widget_rect", list(self._rect))
+        tmr = threading.Timer(1.0, go)
+        tmr.daemon = True
+        self._save_tmr = tmr
+        tmr.start()
 
     def set_shown(self, on):
         self.shown = on
         try:
+            if self.ready:
+                try:
+                    self.win.evaluate_js("W.pause(%s)" % ("false" if on else "true"))
+                except Exception:
+                    pass
             if IS_WIN:
                 self.win.move(*(self._rect[:2] if on else (PARK, PARK)))
                 if on:
@@ -461,16 +471,24 @@ class SseFeed:
         if self.run_flag:
             return
         self.run_flag = True
+        self._resp = None
         self.th = threading.Thread(target=self._loop, daemon=True)
         self.th.start()
 
     def stop(self):
         self.run_flag = False
+        r = getattr(self, "_resp", None)
+        if r is not None:
+            try:
+                r.close()
+            except Exception:
+                pass
 
     def _loop(self):
         while self.run_flag:
             try:
                 with urllib.request.urlopen(self.url, timeout=8) as r:
+                    self._resp = r
                     self.on_link(True)
                     ev, data = "", []
                     for raw in r:

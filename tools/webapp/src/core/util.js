@@ -42,8 +42,9 @@ T.el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.c
 T.VERSION = '@@VERSION@@';                               // TENGEN version (build.py fills it from the VERSION file)
 T.native = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
 T.STICK = '192.168.4.1';
-T.stickHost = () => (new URLSearchParams(location.search).get('host') || (T.native ? T.STICK : location.hostname || T.STICK)).replace(/:\d+$/, '');   // host without port: SSE uses its own port
-T.apiBase = () => { const h = new URLSearchParams(location.search).get('host'); return h ? `http://${h}` : T.native ? `http://${T.STICK}` : ''; };
+const safeHost = () => { const h = new URLSearchParams(location.search).get('host'); return h && /^[A-Za-z0-9._-]+(:\d{1,5})?$/.test(h) ? h : ''; };
+T.stickHost = () => (safeHost() || (T.native ? T.STICK : location.hostname || T.STICK)).replace(/:\d+$/, '');   // host without port: SSE uses its own port
+T.apiBase = () => { const h = safeHost(); return h ? `http://${h}` : T.native ? `http://${T.STICK}` : ''; };
 T.reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
 // ---- quality: fixed (stable mode). Canvas ~1920 px on the long side, glow, dust and scanlines on;
 // app.js turns glow off only if the device really cannot keep up.

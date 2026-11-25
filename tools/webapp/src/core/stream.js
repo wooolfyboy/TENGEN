@@ -20,7 +20,7 @@ if (USB) {
   };
 }
 const host = () => T.stickHost();
-const ssePort = () => new URLSearchParams(location.search).get('sse') || '81';
+const ssePort = () => { const p = new URLSearchParams(location.search).get('sse'); return p && /^\d{1,5}$/.test(p) ? p : '81'; };
 const apiBase = () => T.apiBase();
 
 Stream.setLink = (mode) => {
@@ -34,14 +34,22 @@ Stream.connect = (want) => {
   if (USB) { Stream.usb(want); return; }
   if (Stream.es) { Stream.es.close(); Stream.es = null; }
   clearInterval(Stream.pollT); Stream.pollT = null;
+  clearTimeout(Stream.openT); clearTimeout(Stream.retryT);
   let opened = false;
   const es = new EventSource(`http://${host()}:${ssePort()}/stream?want=${want}`);
   Stream.es = es;
-  const on = (ev, fn) => es.addEventListener(ev, e => { Stream.lastMsg = performance.now(); try { fn(JSON.parse(e.data)); } catch (x) {} });
+  const on = (ev, fn) => es.addEventListener(ev, e => { Stream.lastMsg = performance.now(); if (Stream.mode !== 'live') Stream.setLink('live'); try { fn(JSON.parse(e.data)); } catch (x) {} });
   es.onopen = () => { opened = true; Stream.setLink('live'); };
   for (const k in H) on(k, H[k]);
-  es.onerror = () => { if (Stream.mode === 'live') Stream.setLink('off'); };
-  setTimeout(() => { if (!opened && Stream.es === es) { es.close(); Stream.es = null; Stream.poll(want); } }, 5000);
+  es.onerror = () => {
+    if (Stream.mode === 'live') Stream.setLink('off');
+    if (es.readyState === 2 && Stream.es === es) {
+      es.close(); Stream.es = null;
+      clearTimeout(Stream.retryT);
+      Stream.retryT = setTimeout(() => { if (Stream.want === want) Stream.connect(want); }, 2500);
+    }
+  };
+  Stream.openT = setTimeout(() => { if (!opened && Stream.es === es) { es.close(); Stream.es = null; Stream.poll(want); } }, 5000);
 };
 // fallback: same data via /api/* (slower but works)
 Stream.poll = (want) => {
@@ -89,9 +97,11 @@ Stream.usb = (want) => {
   Stream.usbLoop = true;
   if (Stream.mode !== 'usb') Stream.setLink('usbwait');
   (async () => {
+    let errs = 0;
     for (;;) {
       let batch;
-      try { batch = JSON.parse(await USB.poll()); } catch (e) { await new Promise(r => setTimeout(r, 500)); continue; }
+      try { batch = JSON.parse(await USB.poll()); errs = 0; }
+      catch (e) { if (++errs >= 3) Stream.setLink('usboff'); await new Promise(r => setTimeout(r, 500)); continue; }
       for (const [ev, d] of batch) {
         if (ev === '_x') { Stream.setLink(d === 'web' ? 'usbwait' : d === 'nostick' ? 'usboff' : Stream.mode); continue; }
         Stream.lastMsg = performance.now();

@@ -582,8 +582,8 @@ static void webStart() {
   s_dns.setErrorReplyCode(DNSReplyCode::NoError);
   s_dns.start(53, "*", ip);                        // any address -> this device (the page opens by itself)
   s_srv = new WebServer(80);
-  static const char* const HDRS[] = { "If-None-Match", "Content-Length" };
-  s_srv->collectHeaders(HDRS, 2);
+  const char* hdrs[] = { "If-None-Match", "Content-Length" };
+  s_srv->collectHeaders(hdrs, 2);
   // entry: "/" is the launcher (splash, LITE / FULL choice, same app as /full);
   // "/lite" is the light phone page; "/full" opens the full scene directly.
   // Old /phone and /tablet addresses are kept and lead to the same places.

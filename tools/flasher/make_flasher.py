@@ -85,7 +85,7 @@ fonts_css = open(os.path.join(here, "..", "webapp", "src", "fonts.css"), encodin
 fonts_css = "\n".join(l for l in fonts_css.splitlines() if "font-family:'JetBrains Mono'" in l or "font-family:'Exo 2'" in l)
 page = page.replace("__FONTS__", fonts_css)
 page = page.replace("__VER__", htmlmod.escape(version)).replace("__JS_TEXT__", json.dumps(js, ensure_ascii=False))
-if "{{" in page:
+if "{{" in page or "__FONTS__" in page or "__VER__" in page or "__JS_TEXT__" in page:
     sys.exit("flasher template: unfilled placeholder")
 html = (page.replace("__ESPTOOL__", bundle)
             .replace("__FIRMWARE_B64__", base64.b64encode(fw).decode()))

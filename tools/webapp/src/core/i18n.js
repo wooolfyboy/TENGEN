@@ -15,7 +15,7 @@
   if (DICT) for (const k in DICT) { low.set(k.toLowerCase(), DICT[k]); const t = k.trim(); if (t !== k && !low.has(t.toLowerCase())) low.set(t.toLowerCase(), DICT[k].trim()); }
   const keys = [...low.keys()].filter(k => k.length >= 3).sort((a, b) => b.length - a.length);
   const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const RX = keys.length ? new RegExp('(?<![A-Za-z0-9])(' + keys.map(esc).join('|') + ')(?![A-Za-z0-9])', 'gi') : null;
+  const RX = keys.length ? new RegExp('(^|[^A-Za-z0-9])(' + keys.map(esc).join('|') + ')(?![A-Za-z0-9])', 'gi') : null;
   const isUp = s => s === s.toUpperCase() && s !== s.toLowerCase();
   const isCap = s => s[0] === s[0].toUpperCase() && s.slice(1) === s.slice(1).toLowerCase() && s !== s.toLowerCase();
   const fit = (src, dst) => isUp(src) ? dst.toUpperCase() : isCap(src) ? dst[0].toUpperCase() + dst.slice(1) : dst;
@@ -26,7 +26,7 @@
     if (r !== undefined) return r;
     const exact = DICT[s] ?? low.get(s.toLowerCase());
     if (exact != null) r = DICT[s] != null ? exact : fit(s, exact);
-    else r = RX ? s.replace(RX, m => fit(m, low.get(m.toLowerCase()))) : s;
+    else r = RX ? s.replace(RX, (_, pre, w) => pre + fit(w, low.get(w.toLowerCase()))) : s;
     if (cache.size > 4000) cache.clear();
     cache.set(s, r);
     return r;

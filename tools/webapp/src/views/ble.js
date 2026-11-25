@@ -207,13 +207,15 @@ void main(){vec3 p=pos;float x1=p.x*cam1.x-p.z*cam1.y,z1=p.x*cam1.y+p.z*cam1.x;f
       gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
       gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL);
       drawTowers(-1, 0.3); gl.clear(gl.DEPTH_BUFFER_BIT);                     // reflections in wet asphalt
-      // ground
+      // ground (reuse scratch Float32Arrays across frames)
+      if (!PG.twU) { PG.twU = new Float32Array(MAXP * 4); PG.tcU = new Float32Array(MAXP * 3); PG.rings = new Float32Array(6); }
       gl.disable(gl.DEPTH_TEST);
       gl.useProgram(PG.p); GL.buf('cityGround');
       const lp = PG.a.pos; gl.enableVertexAttribArray(lp); gl.vertexAttribPointer(lp, 3, gl.FLOAT, false, 0, 0);
-      const twU = new Float32Array(MAXP * 4), tcU = new Float32Array(MAXP * 3);
+      const twU = PG.twU, tcU = PG.tcU, rings = PG.rings;
+      twU.fill(0); tcU.fill(0); rings.fill(0);
       list.forEach((b, i) => { twU[i * 4] = b.x; twU[i * 4 + 1] = b.z; twU[i * 4 + 2] = b.glow; twU[i * 4 + 3] = 0; const cc = b.tr ? T.ALERT : b.col; tcU[i * 3] = cc[0] / 255; tcU[i * 3 + 1] = cc[1] / 255; tcU[i * 3 + 2] = cc[2] / 255; });
-      const rings = new Float32Array(6); (opt.rings || []).slice(0, 6).forEach((r, i) => rings[i] = r);
+      (opt.rings || []).slice(0, 6).forEach((r, i) => rings[i] = r);
       GL.set(PG, camU(cam, W, H, { t: opt.t, rmax: opt.rmax || 1.5, rings, mode: opt.grid === 'square' ? 1 : 0, step0: opt.step || 0.2,
         tw: twU, tc: tcU, n: list.length, fogA, fogB }));
       gl.drawArrays(gl.TRIANGLES, 0, PG.nGround); gl.disableVertexAttribArray(lp);

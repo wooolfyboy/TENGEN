@@ -64,7 +64,7 @@
         const opts = it.opts || [];
         ctl = `<div class="chips">${opts.map((o, i) => `<button data-o="${i}" class="${this.isSel(it, o, i) ? 'on' : ''}">${esc(T.tr(String(o)))}</button>`).join('')}</div>`;
       } else if (it.type === 'range') {
-        ctl = `<div class="rng"><input type="range" min="${it.min}" max="${it.max}" step="${it.step || 1}" value="${it.v}"><output>${esc(it.v)}${esc(it.unit || '')}</output></div>`;
+        ctl = `<div class="rng"><input type="range" min="${esc(it.min)}" max="${esc(it.max)}" step="${esc(it.step || 1)}" value="${esc(it.v)}"><output>${esc(it.v)}${esc(it.unit || '')}</output></div>`;
       } else if (it.type === 'bool') {
         const on = it.v === true || it.v === 1 || it.v === '1' || it.v === 'on';
         ctl = `<button class="tgl ${on ? 'on' : ''}" aria-pressed="${on}"><i></i><span>${T.tr(on ? 'ON' : 'OFF')}</span></button>`;
