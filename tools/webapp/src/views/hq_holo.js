@@ -398,7 +398,7 @@ T.hqHolo = {
 
     // 7. Tactical Corner HUD (minimal, translucent, non-intrusive)
     const pad = u * 1.1;
-    const topY = 50; // clear the #subs strip cleanly
+    const topY = pad; // canvas is already translated below #subs by hq.js
     T.txt(g, '天眼 · ' + T.tr('HOLO-DOME 3D'), pad, topY + u * 1.2, u * 1.45, cHot, 't', 'left');
     T.txt(g, T.tr('DRAG TO ORBIT · TAP NODE'), pad, topY + u * 2.5, u * 0.72, cDim, 'm', 'left');
 

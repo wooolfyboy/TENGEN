@@ -19,10 +19,9 @@ const JP = () => T.SEAL_FONT, FT = () => K() ? ANTON : RAJ, FM = () => K() ? SPM
 // Oswald has one weight for all - no need for 'bold'
 const font = (g, px, f, w = '') => { g.font = `${f === ANTON ? '' : w}${px}px ${f}`; };
 const tx = (g, s, x, y, px, col, f = FM(), al = 'left', w = '') => { font(g, px, f, w); g.fillStyle = col; g.textAlign = al; g.textBaseline = 'alphabetic'; g.fillText(s, x, y); };
-// 'bold' Japanese: the system print font has one weight, thickness is added by stroke
-const jp = (g, s, x, y, px, col, al = 'left', bold = 0.06) => {
+// Japanese glyphs: fast fillText (strokeText on CJK kills mobile/tablet Canvas2D FPS)
+const jp = (g, s, x, y, px, col, al = 'left') => {
   font(g, px, JP()); g.textAlign = al; g.textBaseline = 'alphabetic';
-  g.lineJoin = 'round'; g.lineWidth = px * bold; g.strokeStyle = col; g.strokeText(s, x, y);
   g.fillStyle = col; g.fillText(s, x, y);
 };
 const pad2 = n => String(n).padStart(2, '0');
@@ -182,12 +181,15 @@ T.views.push({
     this.wfPanel(g, m, yBot, bw, botH, u, dt);
     this.lvlPanel(g, m * 2 + bw, yBot, w - 3 * m - bw, botH, u, dt, t);
     this.log(g, m, yLog, w - 2 * m, logH, u, t);
-    // scanlines (pattern is fixed 4x3; create once)
-    if (!this.scan) {
-      const c = document.createElement('canvas'); c.width = 4; c.height = 3; const q = c.getContext('2d');
-      q.fillStyle = 'rgba(0,0,0,.28)'; q.fillRect(0, 0, 4, 1); this.scan = g.createPattern(c, 'repeat');
+    // scanlines (skip heavy full-screen 2D pattern blend on touch tablets to keep 60 fps)
+    const coarse = this._coarse ?? (this._coarse = !!(window.matchMedia && window.matchMedia('(pointer:coarse)').matches));
+    if (T.Q.scan && !K() && !coarse) {
+      if (!this.scan) {
+        const c = document.createElement('canvas'); c.width = 4; c.height = 3; const q = c.getContext('2d');
+        q.fillStyle = 'rgba(0,0,0,.28)'; q.fillRect(0, 0, 4, 1); this.scan = g.createPattern(c, 'repeat');
+      }
+      g.fillStyle = this.scan; g.fillRect(0, 0, w, h);
     }
-    if (T.Q.scan && !K()) { g.fillStyle = this.scan; g.fillRect(0, 0, w, h); }   // KURENAI - flat, no scanlines
   },
 
   // events: new near device, remote, card
@@ -244,31 +246,46 @@ T.views.push({
   blePanel(g, x, y, w, h, u, t) {
     const y0 = panel(g, x, y, w, h, u, 'BLE · 近距離', '機器');
     T.hits.rect(x, y, w, h, { go: 'ble' });
-    const devs = [...S.dev.values()].filter(e => e.alive).sort((a, b) => b.rs - a.rs);
-    const n = S.ble ? S.ble.n : devs.length, now = performance.now();
-    const fresh = devs.filter(e => !e.first && now - e.born < 300000).length;
+    const now = performance.now();
+    if (!this._bleDevs || now - (this._bleT || 0) > 250) {
+      this._bleT = now;
+      this._bleDevs = [...S.dev.values()].filter(e => e.alive).sort((a, b) => b.rs - a.rs);
+      this._bleFresh = this._bleDevs.filter(e => !e.first && now - e.born < 300000).length;
+    }
+    const devs = this._bleDevs, n = S.ble ? S.ble.n : devs.length, fresh = this._bleFresh || 0;
     tx(g, S.ble ? String(n) : '—', x + u * 0.7, y0 + u * 4.2, u * 4.6, E.or2, FT(), 'left', '600 ');
     font(g, u * 4.6, FT(), '600 '); const nx = x + u * 1.4 + g.measureText(S.ble ? String(n) : '—').width;
     tx(g, 'DEVICES', nx, y0 + u * 2.8, u * 0.7, E.or);
     tx(g, '+' + fresh + ' NEW / 5 MIN', nx, y0 + u * 3.9, u * 0.7, fresh ? E.grn : E.dim);
-    // honeycomb: a cell per device, color = strength, new ones red
+    // honeycomb: precomputed hex offsets + single batched outline stroke
     const top = y0 + u * 5.2, s = u * 0.62, dx = s * 1.75, dy = s * 1.52;
     const cols = Math.max(1, Math.floor((w - u * 1.2) / dx)), rows = Math.max(1, Math.floor((y + h - top - u * 0.4) / dy));
+    const hx = [0.866 * s, 0, -0.866 * s, -0.866 * s, 0, 0.866 * s];
+    const hy = [0.5 * s, s, 0.5 * s, -0.5 * s, -s, -0.5 * s];
     let i = 0;
+    // fill active cells first
     for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++, i++) {
+      const e = devs[i]; if (!e) continue;
       const cx = x + u * 0.6 + s + c * dx + (r % 2) * dx / 2, cy = top + s + r * dy;
       if (cx + s > x + w - u * 0.3) continue;
-      const e = devs[i];
-      g.beginPath();
-      for (let k = 0; k < 6; k++) { const a = Math.PI / 3 * k + Math.PI / 6; g.lineTo(cx + s * Math.cos(a), cy + s * Math.sin(a)); }
+      const p = T.pct(e.rs), nw = S.isNew(e, now), trk = S.isTrk(e);
+      g.beginPath(); g.moveTo(cx + hx[0], cy + hy[0]);
+      for (let k = 1; k < 6; k++) g.lineTo(cx + hx[k], cy + hy[k]);
       g.closePath();
-      if (e) {
-        const p = T.pct(e.rs), nw = S.isNew(e, now), trk = S.isTrk(e);
-        g.fillStyle = nw || trk ? (blink(t, 2) || !nw ? E.red : E.dk) : p > 0.55 ? E.or : p > 0.25 ? E.mid : E.dim;
-        g.globalAlpha = 0.35 + 0.65 * e.h; g.fill(); g.globalAlpha = 1;
-      }
-      g.strokeStyle = orA(.3); g.lineWidth = 1; g.stroke();
+      g.fillStyle = nw || trk ? (blink(t, 2) || !nw ? E.red : E.dk) : p > 0.55 ? E.or : p > 0.25 ? E.mid : E.dim;
+      g.globalAlpha = 0.35 + 0.65 * e.h; g.fill();
     }
+    g.globalAlpha = 1;
+    // batch all honeycomb outlines into one single stroke()
+    g.strokeStyle = orA(.3); g.lineWidth = 1; g.beginPath();
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+      const cx = x + u * 0.6 + s + c * dx + (r % 2) * dx / 2, cy = top + s + r * dy;
+      if (cx + s > x + w - u * 0.3) continue;
+      g.moveTo(cx + hx[0], cy + hy[0]);
+      for (let k = 1; k < 6; k++) g.lineTo(cx + hx[k], cy + hy[k]);
+      g.closePath();
+    }
+    g.stroke();
   },
 
   wifiPanel(g, x, y, w, h, u) {
@@ -311,28 +328,52 @@ T.views.push({
     const y0 = panel(g, x, y, w, h, u, 'RADIO HORIZON · 電波地平', '', 'RANGE ≈ RSSI · ' + nB + ' BLE · ' + nA + ' AP · ' + nR + ' RF');
     const cx = x + w / 2, cy = y0 + (y + h - y0) / 2, R = Math.min(w * 0.46, (y + h - y0) * 0.44);
     if (!(R > 8)) return;                                // window not laid out yet (rotation/resize)
-    const gr = g.createRadialGradient(cx, cy, 0, cx, cy, R * 1.25); gr.addColorStop(0, orA(.10)); gr.addColorStop(1, orA(0));
-    g.fillStyle = gr; g.fillRect(x + 1, y0, w - 2, y + h - y0 - 1);
-    jp(g, '索敵', x + u * 0.8, y0 + u * 3.2, u * 2.8, E.or, 'left', 0.05);
-    tx(g, 'SCANNING ALL BANDS', x + u * 0.9, y0 + u * 4.3, u * 0.7, E.or);
-    // rings, rays, scale
-    g.lineWidth = 1;
-    for (let i = 1; i <= 5; i++) {
-      g.strokeStyle = orA(i === 5 ? 0.8 : 0.3); g.setLineDash(i % 2 ? [] : [u * 0.2, u * 0.3]);
-      g.beginPath(); g.arc(cx, cy, R * i / 5, 0, T.TAU); g.stroke();
+    // cached static radar grid (gradient, rings, 12 spokes, 72 ticks, labels, legend) -> 1 GPU blit/frame
+    const rh = Math.max(1, Math.ceil(y + h - y0)), rw = Math.max(1, Math.ceil(w));
+    const dpr = Math.min(2, this.cv.dpr || 1);
+    const rKey = `${rw}x${rh}@${dpr}:${this.th}:${T.lang}`;
+    if (this._radKey !== rKey) {
+      this._radKey = rKey;
+      const rc = this._radBg || (this._radBg = document.createElement('canvas'));
+      rc.width = Math.ceil(rw * dpr); rc.height = Math.ceil(rh * dpr);
+      const rg = rc.getContext('2d'); rg.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const lcx = w / 2, lcy = (y + h - y0) / 2;
+      const gr = rg.createRadialGradient(lcx, lcy, 0, lcx, lcy, R * 1.25); gr.addColorStop(0, orA(.10)); gr.addColorStop(1, orA(0));
+      rg.fillStyle = gr; rg.fillRect(1, 0, w - 2, rh - 1);
+      jp(rg, '索敵', u * 0.8, u * 3.2, u * 2.8, E.or, 'left');
+      tx(rg, 'SCANNING ALL BANDS', u * 0.9, u * 4.3, u * 0.7, E.or);
+      rg.lineWidth = 1;
+      for (let i = 1; i <= 5; i++) {
+        rg.strokeStyle = orA(i === 5 ? 0.8 : 0.3); rg.setLineDash(i % 2 ? [] : [u * 0.2, u * 0.3]);
+        rg.beginPath(); rg.arc(lcx, lcy, R * i / 5, 0, T.TAU); rg.stroke();
+      }
+      rg.setLineDash([]);
+      rg.strokeStyle = orA(.16); rg.beginPath();
+      for (let a = 0; a < 12; a++) { const q = a * Math.PI / 6; rg.moveTo(lcx, lcy); rg.lineTo(lcx + R * Math.cos(q), lcy + R * Math.sin(q)); }
+      rg.stroke();
+      rg.strokeStyle = E.or; rg.beginPath();
+      for (let a = 0; a < 72; a++) { const q = a * Math.PI / 36, l = a % 6 ? u * 0.35 : u * 0.8; rg.moveTo(lcx + (R + u * 0.4) * Math.cos(q), lcy + (R + u * 0.4) * Math.sin(q)); rg.lineTo(lcx + (R + u * 0.4 + l) * Math.cos(q), lcy + (R + u * 0.4 + l) * Math.sin(q)); }
+      rg.stroke();
+      ['-45', '-60', '-75', '-90'].forEach((s, i) => tx(rg, s + ' dBm', lcx + u * 0.3, lcy - R * (i + 1) / 5 - u * 0.4, u * 0.6, E.or));
+      const ly = rh - u * 0.8; let lx = u * 0.8;
+      for (const [c, s] of [[E.grn, 'SAVED 自'], [E.or2, 'KNOWN 既'], [E.red, 'NEW 新'], [E.cy, '◆ WI-FI AP'], [E.wht, '▲ 433 RF']]) {
+        rg.fillStyle = c; rg.beginPath(); rg.arc(lx + u * 0.25, ly - u * 0.25, u * 0.22, 0, T.TAU); rg.fill();
+        tx(rg, s, lx + u * 0.7, ly, u * 0.62, E.or); font(rg, u * 0.62, FM()); lx += u * 1.6 + rg.measureText(s).width;
+      }
     }
-    g.setLineDash([]);
-    g.strokeStyle = orA(.16);
-    for (let a = 0; a < 12; a++) { const q = a * Math.PI / 6; g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx + R * Math.cos(q), cy + R * Math.sin(q)); g.stroke(); }
-    g.strokeStyle = E.or;
-    for (let a = 0; a < 72; a++) { const q = a * Math.PI / 36, l = a % 6 ? u * 0.35 : u * 0.8; g.beginPath(); g.moveTo(cx + (R + u * 0.4) * Math.cos(q), cy + (R + u * 0.4) * Math.sin(q)); g.lineTo(cx + (R + u * 0.4 + l) * Math.cos(q), cy + (R + u * 0.4 + l) * Math.sin(q)); g.stroke(); }
-    ['-45', '-60', '-75', '-90'].forEach((s, i) => tx(g, s + ' dBm', cx + u * 0.3, cy - R * (i + 1) / 5 - u * 0.4, u * 0.6, E.or));
-    // beam
-    const sw = this.sweep, N = 22;
-    for (let i = 0; i < N; i++) {
-      const a1 = sw - i * 0.035, a2 = a1 - 0.036;
-      g.fillStyle = orA((0.26 * (1 - i / N)).toFixed(3));
-      g.beginPath(); g.moveTo(cx, cy); g.arc(cx, cy, R, a2, a1); g.closePath(); g.fill();
+    g.drawImage(this._radBg, x, y0, rw, rh);
+    // single-draw radar sweep cone (conic gradient when supported, 6-slice fallback)
+    const sw = this.sweep;
+    if (g.createConicGradient) {
+      const span = 0.8, cg = g.createConicGradient(sw - span, cx, cy), f = span / T.TAU;
+      cg.addColorStop(0, orA(0)); cg.addColorStop(f * 0.98, orA(0.28)); cg.addColorStop(f, orA(0)); cg.addColorStop(1, orA(0));
+      g.fillStyle = cg; g.beginPath(); g.moveTo(cx, cy); g.arc(cx, cy, R, sw - span, sw); g.closePath(); g.fill();
+    } else {
+      for (let i = 0; i < 6; i++) {
+        const a1 = sw - i * 0.13, a2 = a1 - 0.135;
+        g.fillStyle = orA((0.24 * (1 - i / 6)).toFixed(3));
+        g.beginPath(); g.moveTo(cx, cy); g.arc(cx, cy, R, a2, a1); g.closePath(); g.fill();
+      }
     }
     g.strokeStyle = E.or2; g.lineWidth = u * 0.12; g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx + R * Math.cos(sw), cy + R * Math.sin(sw)); g.stroke();
     // dots: radius by strength, angle fixed from id; brighter when the beam passed
@@ -372,16 +413,10 @@ T.views.push({
       if (boxes.some(q => b[0] < q[0] + q[2] && q[0] < b[0] + b[2] && b[1] < q[1] + q[3] && q[1] < b[1] + b[3])) continue;
       boxes.push(b); tx(g, str, b[0], py + u * 0.25, u * 0.72, col, FC(), 'left', '500 ');
     }
-    // center - the eye
+    // center - the eye (legend is already baked into _radBg)
     g.fillStyle = K() ? E.bg : '#000'; g.beginPath(); g.arc(cx, cy, u * 0.9, 0, T.TAU); g.fill();
     g.strokeStyle = E.or; g.lineWidth = u * 0.15; g.stroke();
-    jp(g, '眼', cx, cy + u * 0.4, u * 1.1, E.or, 'center', 0.02);
-    // legend
-    const ly = y + h - u * 0.8; let lx = x + u * 0.8;
-    for (const [c, s] of [[E.grn, 'SAVED 自'], [E.or2, 'KNOWN 既'], [E.red, 'NEW 新'], [E.cy, '◆ WI-FI AP'], [E.wht, '▲ 433 RF']]) {
-      g.fillStyle = c; g.beginPath(); g.arc(lx + u * 0.25, ly - u * 0.25, u * 0.22, 0, T.TAU); g.fill();
-      tx(g, s, lx + u * 0.7, ly, u * 0.62, E.or); font(g, u * 0.62, FM()); lx += u * 1.6 + g.measureText(s).width;
-    }
+    jp(g, '眼', cx, cy + u * 0.4, u * 1.1, E.or, 'center');
     // warning 接近警告
     const age = t - this.alertT;
     if (age < 20 && this.alertTxt && S.cfg.al_plate) {
@@ -415,9 +450,9 @@ T.views.push({
     const y0 = panel(g, x, y, w, h, u, 'AUDIO · 音', '', sn ? Math.round(S.level) + ' dB' : 'MIC OFF');
     T.hits.rect(x, y, w, h, { go: 'snd' });
     const top = y0 + u * 0.4, hh = y + h - top - u * 0.4, mid = top + hh / 2;
-    g.strokeStyle = orA(.15); g.lineWidth = 1;
-    for (let i = 0; i <= 8; i++) { const xx = x + w * i / 8; g.beginPath(); g.moveTo(xx, top); g.lineTo(xx, top + hh); g.stroke(); }
-    g.beginPath(); g.moveTo(x, mid); g.lineTo(x + w, mid); g.stroke();
+    g.strokeStyle = orA(.15); g.lineWidth = 1; g.beginPath();
+    for (let i = 0; i <= 8; i++) { const xx = x + w * i / 8; g.moveTo(xx, top); g.lineTo(xx, top + hh); }
+    g.moveTo(x, mid); g.lineTo(x + w, mid); g.stroke();
     g.strokeStyle = E.grn; g.lineWidth = u * 0.12; g.beginPath();
     for (let i = 0; i < 64; i++) { const xx = x + u * 0.3 + (w - u * 0.6) * i / 63, yy = mid - (sn ? S.wave[i] : 0) * hh * 0.45; i ? g.lineTo(xx, yy) : g.moveTo(xx, yy); }
     g.stroke();
