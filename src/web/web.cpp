@@ -392,7 +392,7 @@ static int sseClients(bool& ble, bool& wifi, bool& snd, int& subM, int& subB, bo
 
 static void sseTick(uint32_t now) {
   static String o;                                 // reused scratch buffer: avoids ~30 heap allocs/sec
-  if (o.capacity() < 2048) o.reserve(2048);
+  o.reserve(2048);
   if (s_sseSrv) sseAccept();
   for (auto& k : s_sse) {
     if (!k.on) continue;
