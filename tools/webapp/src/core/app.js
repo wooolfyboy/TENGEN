@@ -23,23 +23,33 @@ App.renderSubs = () => {
 // Sections stay in memory: leaving hides the scene instead of destroying it, so returning is instant
 // with everything already accumulated. Keep the last KEEP, free the oldest.
 const KEEP = 3, alive = [];
-App.go = id => {
+App.go = (id, sub) => {
   const v = T.views.find(x => x.id === id) || T.views[0];
-  if (App.cur === v) return;
+  if (App.cur === v) {
+    if (sub != null && v.subs && v.sub !== sub) {
+      v.sub = Math.min(sub, v.subs.length - 1);
+      v.onSub && v.onSub(v.sub);
+      App.renderSubs(); App.fresh(); App.rewant();
+    }
+    return;
+  }
   if (App.cur && App.cur.root) App.cur.root.hidden = true;
   App.cur = v;
   const i = alive.indexOf(v); if (i >= 0) alive.splice(i, 1);
   alive.push(v);
   while (alive.length > KEEP) { const old = alive.shift(); old.unmount(); old.root = null; }
-  if (i < 0) {                                         // new (or unloaded): restore the saved tab
+  if (sub != null && v.subs) {
+    v.sub = Math.min(sub, v.subs.length - 1);
+  } else if (i < 0) {                                  // new (or unloaded): restore the saved tab
     try { const s = localStorage.getItem('sub_' + v.id); if (s != null && v.subs) v.sub = Math.min(+s, v.subs.length - 1); } catch (e) {}
   }
-  try { localStorage.setItem('view', id); } catch (e) {}
+  if (!(T.auto && T.auto._switching)) { try { localStorage.setItem('view', id); } catch (e) {} }
   [...nav.children].forEach(b => b.classList.toggle('on', b.dataset.id === v.id));
   const w = document.getElementById('wipe'); w.classList.remove('go'); void w.offsetWidth; w.classList.add('go');
   App.renderSubs();
   App.fresh();                                         // LITE applies only to the section that struggled; a new section starts full
   if (v.root) { v.root.hidden = false; v.cv && v.cv.fit(); } else v.mount(main);
+  if (sub != null && v.onSub) v.onSub(v.sub);
   App.rewant();
 };
 // stream subscription: a view may change it live (want is a string or function)
@@ -48,7 +58,7 @@ App.rewant = () => {
   const want = (typeof v.want === 'function' ? v.want() : v.want) || 'st';   // gallery needs nothing from the stick, only status
   if (want !== T.Stream.want) T.Stream.connect(want);
 };
-T.views.forEach(v => { const b = T.el('button', '', T.tr(v.title)); b.dataset.id = v.id; b.onclick = () => App.go(v.id); nav.appendChild(b); });
+T.views.forEach(v => { const b = T.el('button', '', T.tr(v.title)); b.dataset.id = v.id; b.onclick = () => { T.auto && T.auto.onUserNav(); App.go(v.id); }; nav.appendChild(b); });
 // language change (as on the device): menu, tabs, link label and the open section redraw their labels
 T.onLang.push(() => {
   for (const b of nav.children) { const v = T.views.find(x => x.id === b.dataset.id); if (v) b.textContent = T.tr(v.title); }
@@ -96,6 +106,7 @@ const loop = now => {
   next = Math.max(next + STEP, now - STEP);            // fell behind: do not catch up in a burst
   const dt = Math.min(0.1, (now - last) / 1000); last = now;
   S.tick(dt);
+  if (T.auto) T.auto.tick(dt, now);
   if (App.cur && !App.hold) App.cur.frame(dt, now / 1000);   // the scene waits during the splash (data keeps flowing)
   fpsN++; fpsT += dt;
   if (fpsT >= 1) {

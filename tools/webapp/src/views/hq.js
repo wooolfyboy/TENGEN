@@ -56,13 +56,21 @@ const panel = (g, x, y, w, h, u, en, kj, right, hot) => {
 const blink = (t, hz = 1) => (S.cfg && !S.cfg.al_blink) || (t * hz) % 1 < 0.6;
 
 T.views.push({
-  id: 'hq', title: 'HQ', want: 'ble,wifi,snd,sens,wx,pc,ir,nfc', 
+  id: 'hq', title: 'HQ', subs: ['Command', 'Holo 3D', 'Autopilot'], sub: 0, want: 'ble,wifi,snd,sens,wx,pc,ir,nfc',
   mount(main) {
     this.root = T.el('div', 'view'); const st = T.el('div', 'stage'); this.root.appendChild(st); this.cv = T.canvas(st); main.appendChild(this.root);
     this.sweep = 0; this.wf = []; this.wfPk = -1; this.lvl = 0; this.alertT = -99; this.alertTxt = null;
     this.prevIr = 0; this.prevNfc = 0; this.flashIr = -99; this.flashNfc = -99; this.scan = null; this.seenAt = new Map();
-    this.cv.cv.addEventListener('pointerup', e => { const h = T.hits.at(e.offsetX, e.offsetY); if (h && h.go) T.app.go(h.go); });
+    if (T.hqHolo) T.hqHolo.init(this);
+    this.cv.cv.addEventListener('pointerup', e => { if (this.sub !== 0) return; const h = T.hits.at(e.offsetX, e.offsetY); if (h && h.go) T.app.go(h.go); });
     this.alUI();
+  },
+  onSub(i) {
+    if (i === 2) {
+      if (T.auto) T.auto.start();
+    } else if (T.auto && T.auto.on && !T.auto._switching) {
+      T.auto.stop();
+    }
   },
   unmount() { this.cv.dispose(); this.root.remove(); },
 
@@ -122,11 +130,14 @@ T.views.push({
   frame(dt, t) {
     const th = K() ? 'kurenai' : 'denko';
     if (this.th !== th) { this.th = th; Object.assign(E, PAL[th]); }
-    // top strip for the ⚙ ALERTS button: the scene shifts below it (touches too)
-    const off = 40, o = this.cv;
-    o.g.fillStyle = E.bg; o.g.fillRect(0, 0, o.w, off);
+    // top strip for subtabs + ⚙ ALERTS button (collapses to 0 in cinema-hide mode)
+    const off = document.body.classList.contains('cinema-hide') ? 0 : 40, o = this.cv;
+    if (off) { o.g.fillStyle = this.sub === 1 ? T.C.bg : E.bg; o.g.fillRect(0, 0, o.w, off); }
     o.g.save(); o.g.translate(0, off);
-    try { this.frame3(dt, t, o.g, o.w, o.h - off); } finally { o.g.restore(); }
+    try {
+      if (this.sub === 1 && T.hqHolo) T.hqHolo.frame(dt, t, o.g, o.w, o.h - off);
+      else this.frame3(dt, t, o.g, o.w, o.h - off);
+    } finally { o.g.restore(); }
     for (const q of T.hits.list) q.y += off;
   },
   frame3(dt, t, g, w, h) {

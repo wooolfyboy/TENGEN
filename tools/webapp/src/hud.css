@@ -109,6 +109,24 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--hot);font:16px/1
 .hq-al .f{display:flex;justify-content:space-between;align-items:center;padding:10px 12px}.hq-al .msg{color:#69ff6e;font-size:12px}
 .hq-al .rst{padding:8px 12px;background:none;color:#ff2a1f;border:1px solid #ff2a1f}
 
+/* HQ > Autopilot (Cinema mode) */
+body.cinema #bar,body.cinema #subs,body.cinema .hq-gear{transition:opacity .45s ease}
+body.cinema-hide #bar,body.cinema-hide #subs,body.cinema-hide .hq-gear{opacity:0;pointer-events:none}
+body.cinema-hide #main{top:0}
+.auto-hud{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);z-index:8;min-width:260px;max-width:92vw;background:rgba(var(--bgrgb),.78);border:1px solid rgba(var(--accrgb),.55);backdrop-filter:blur(6px);padding:6px 12px 0;font:600 13px/1 var(--ft);letter-spacing:.1em;color:var(--hot);transition:opacity .45s ease}
+body.cinema-hide .auto-hud{opacity:.38}
+.auto-hud:hover{opacity:1!important}
+.auto-top{display:flex;align-items:center;gap:10px;padding-bottom:6px}
+.auto-dot{width:8px;height:8px;border-radius:50%;background:var(--acc);box-shadow:0 0 8px var(--acc);flex:none}
+.auto-lbl{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-transform:uppercase}
+.auto-btns{display:flex;gap:4px}
+.auto-btns button{background:transparent;border:1px solid rgba(var(--accrgb),.35);color:var(--hot);padding:3px 8px;font:12px/1 var(--f);cursor:pointer}
+.auto-btns button:hover{background:var(--acc);color:var(--bg)}
+.auto-prog{height:2px;background:rgba(var(--accrgb),.18);margin:0 -12px}
+.auto-prog i{display:block;height:100%;width:0;background:var(--acc);transition:width .2s linear}
+html.kurenai .auto-hud{background:#0b0b0b;border:2px solid #f4f1ea;backdrop-filter:none}
+html.kurenai .auto-dot{background:#e5262f;box-shadow:none}
+html.kurenai .auto-prog i{background:#e5262f}
 /* ===== KURENAI 紅 theme: black / white / red, no glow; selected = white slanted plate ===== */
 html.kurenai{--accrgb:229,38,47;--panelrgb:30,30,30;--bgrgb:11,11,11;--bg:#0b0b0b;--panel:#151515;--line:#3a3a3a;--acc:#e5262f;--hot:#f4f1ea;--label:#bdb9b0;--steel:#bdb9b0;--dim:#8a8a8a;--alert:#ff3b30;
   --ft:Oswald,'Arial Narrow',sans-serif;--f:'JetBrains Mono',ui-monospace,monospace}
