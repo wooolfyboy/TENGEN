@@ -589,11 +589,12 @@ static void webStart() {
   // Old /phone and /tablet addresses are kept and lead to the same places.
   static auto sendApp = [] {                       // tablet app: one gzip file with ETag + chunked WDT-safe send
     s_reqs++;
-    static const char* const ETAG = "\"" TABLET_HTML_SHA "\"";
+    char etag[72];
+    snprintf(etag, sizeof(etag), "\"%s\"", TABLET_HTML_SHA);
     s_srv->client().setNoDelay(true);
-    s_srv->sendHeader("ETag", ETAG);
+    s_srv->sendHeader("ETag", etag);
     s_srv->sendHeader("Cache-Control", "no-cache");
-    if (s_srv->header("If-None-Match") == ETAG) {
+    if (s_srv->header("If-None-Match") == etag) {
       s_srv->send(304, "text/plain", "");
       return;
     }
