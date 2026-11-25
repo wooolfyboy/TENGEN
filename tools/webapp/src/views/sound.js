@@ -14,7 +14,7 @@
   const NAMES = ['Sound spectrum', 'Terrain', 'Reactor', 'Waveform', 'XY scope'];
 
   T.views.push({
-    id: 'snd', title: 'Sound', want: 'snd', subs: ['Spectrum', 'Terrain', 'Reactor', 'Waveform', 'XY'], sub: 0,
+    id: 'snd', group: 'tools', title: 'Sound', want: 'snd', subs: ['Spectrum', 'Terrain', 'Reactor', 'Waveform', 'XY'], sub: 0,
     mount(main) {
       this.root = T.el('div', 'view');
       const st = T.el('div', 'stage'); this.root.appendChild(st);

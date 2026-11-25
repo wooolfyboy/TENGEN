@@ -61,7 +61,7 @@ const lvl = v => T.clamp((v + 120 - 10) / 70);          // like wfColor on the s
 const ROWS = 36, BINS = 96;
 
 T.views.push({
-  id: 'sub', title: 'Sub-GHz', subs: ['Spectrum', 'Monitor', 'Sensors'], sub: 0,
+  id: 'sub', group: 'tools', title: 'Sub-GHz', subs: ['Spectrum', 'Monitor', 'Sensors'], sub: 0,
   want() { return this.sub === 2 ? 'sens' : `sub&sm=${this.sub}&sb=${this.band}`; },
   mount(main) {
     try { const b = localStorage.getItem('sub_band'); this.band = b != null ? +b : 1; } catch (e) { this.band = this.band ?? 1; }

@@ -5,7 +5,7 @@
 const AGO = ms => T.ago(ms / 1000);
 
 T.views.push({
-  id: 'probe', title: 'IR · NFC', subs: ['IR', 'NFC'], sub: 0,
+  id: 'probe', group: 'tools', title: 'IR · NFC', subs: ['IR', 'NFC'], sub: 0,
   want() { return this.sub ? 'nfc' : 'ir'; },
   mount(main) {
     this.root = T.el('div', 'view');

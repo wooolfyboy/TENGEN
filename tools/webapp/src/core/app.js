@@ -1,7 +1,7 @@
 // ---- app: tabs, subtabs, frame loop, fullscreen ----
 const App = T.app = { cur: null };
 const nav = document.getElementById('nav'), subs = document.getElementById('subs'), main = document.getElementById('main');
-const elBat = document.getElementById('bat'), elRadios = document.getElementById('radios'), elClock = document.getElementById('clock'), elFps = document.getElementById('fps'), elUpd = document.getElementById('upd');
+const elBat = document.getElementById('bat'), elRadios = document.getElementById('radios'), elClock = document.getElementById('clock'), elFps = document.getElementById('fps'), elUpd = document.getElementById('upd'), elSet = document.getElementById('setBtn');
 App.status = () => {
   const s = S.st; if (!s) return;
   elBat.textContent = s.bat >= 0 ? 'BAT ' + s.bat + '%' + (s.usb ? ' ⚡' : '') : '';
@@ -11,9 +11,34 @@ App.status = () => {
 
 const updClock = () => { const d = new Date(); elClock.textContent = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
 updClock(); setInterval(updClock, 10000);
+const TOOL_ITEMS = [
+  { id: 'sub', label: '433 MHz' },
+  { id: 'snd', label: 'Sound' },
+  { id: 'probe', sub: 0, label: 'IR' },
+  { id: 'probe', sub: 1, label: 'NFC' },
+];
 App.renderSubs = () => {
   const v = App.cur; subs.innerHTML = '';
-  document.body.classList.toggle('hassubs', !!(v.subs && v.subs.length));
+  const isTool = v.group === 'tools';
+  const hasSubs = isTool || !!(v.subs && v.subs.length);
+  document.body.classList.toggle('hassubs', hasSubs);
+  if (isTool) {
+    TOOL_ITEMS.forEach(it => {
+      const on = v.id === it.id && (it.sub == null || v.sub === it.sub);
+      const b = T.el('button', on ? 'on' : '', T.tr(it.label));
+      b.onclick = () => { T.auto && T.auto.onUserNav(); App.go(it.id, it.sub); };
+      subs.appendChild(b);
+    });
+    if (v.id !== 'probe' && v.subs && v.subs.length) {
+      subs.appendChild(T.el('span', 'sub-sep'));
+      v.subs.forEach((n, i) => {
+        const b = T.el('button', i === v.sub ? 'on' : '', T.tr(n));
+        b.onclick = () => { v.sub = i; v.onSub && v.onSub(i); App.renderSubs(); App.fresh(); try { localStorage.setItem('sub_' + v.id, i); } catch (e) {} App.rewant(); };
+        subs.appendChild(b);
+      });
+    }
+    return;
+  }
   (v.subs || []).forEach((n, i) => {
     const b = T.el('button', i === v.sub ? 'on' : '', T.tr(n));
     b.onclick = () => { v.sub = i; v.onSub && v.onSub(i); App.renderSubs(); App.fresh(); try { localStorage.setItem('sub_' + v.id, i); } catch (e) {} App.rewant(); };
@@ -24,6 +49,10 @@ App.renderSubs = () => {
 // with everything already accumulated. Keep the last KEEP, free the oldest.
 const KEEP = 3, alive = [];
 App.go = (id, sub) => {
+  if (id === 'ov') id = 'hq';
+  if (id === 'tools') {
+    try { id = localStorage.getItem('last_tool') || 'sub'; } catch (e) { id = 'sub'; }
+  }
   const v = T.views.find(x => x.id === id) || T.views[0];
   if (App.cur === v) {
     if (sub != null && v.subs && v.sub !== sub) {
@@ -43,8 +72,15 @@ App.go = (id, sub) => {
   } else if (i < 0) {                                  // new (or unloaded): restore the saved tab
     try { const s = localStorage.getItem('sub_' + v.id); if (s != null && v.subs) v.sub = Math.min(+s, v.subs.length - 1); } catch (e) {}
   }
-  if (!(T.auto && T.auto._switching)) { try { localStorage.setItem('view', id); } catch (e) {} }
-  [...nav.children].forEach(b => b.classList.toggle('on', b.dataset.id === v.id));
+  if (!(T.auto && T.auto._switching)) {
+    try {
+      localStorage.setItem('view', v.id);
+      if (v.group === 'tools') localStorage.setItem('last_tool', v.id);
+    } catch (e) {}
+  }
+  const navId = v.group === 'tools' ? 'tools' : v.id;
+  [...nav.children].forEach(b => b.classList.toggle('on', b.dataset.id === navId));
+  if (elSet) elSet.classList.toggle('on', v.id === 'set');
   const w = document.getElementById('wipe'); w.classList.remove('go'); void w.offsetWidth; w.classList.add('go');
   App.renderSubs();
   App.fresh();                                         // LITE applies only to the section that struggled; a new section starts full
@@ -58,10 +94,32 @@ App.rewant = () => {
   const want = (typeof v.want === 'function' ? v.want() : v.want) || 'st';   // gallery needs nothing from the stick, only status
   if (want !== T.Stream.want) T.Stream.connect(want);
 };
-T.views.forEach(v => { const b = T.el('button', '', T.tr(v.title)); b.dataset.id = v.id; b.onclick = () => { T.auto && T.auto.onUserNav(); App.go(v.id); }; nav.appendChild(b); });
+let toolsBtnAdded = false;
+T.views.forEach(v => {
+  if (v.id === 'set') return;
+  if (v.group === 'tools') {
+    if (toolsBtnAdded) return;
+    toolsBtnAdded = true;
+    const b = T.el('button', '', T.tr('Tools')); b.dataset.id = 'tools';
+    b.onclick = () => { T.auto && T.auto.onUserNav(); App.go('tools'); };
+    nav.appendChild(b);
+    return;
+  }
+  const b = T.el('button', '', T.tr(v.title)); b.dataset.id = v.id;
+  b.onclick = () => { T.auto && T.auto.onUserNav(); App.go(v.id); };
+  nav.appendChild(b);
+});
+if (elSet) {
+  elSet.title = T.tr('Settings');
+  elSet.onclick = () => { T.auto && T.auto.onUserNav(); App.go('set'); };
+}
 // language change (as on the device): menu, tabs, link label and the open section redraw their labels
 T.onLang.push(() => {
-  for (const b of nav.children) { const v = T.views.find(x => x.id === b.dataset.id); if (v) b.textContent = T.tr(v.title); }
+  for (const b of nav.children) {
+    if (b.dataset.id === 'tools') { b.textContent = T.tr('Tools'); continue; }
+    const v = T.views.find(x => x.id === b.dataset.id); if (v) b.textContent = T.tr(v.title);
+  }
+  if (elSet) elSet.title = T.tr('Settings');
   if (App.cur) App.renderSubs();
   if (T.Stream && T.Stream.mode) T.Stream.setLink(T.Stream.mode);
   for (const v of T.views) if (v.root && v.onLang) v.onLang();
@@ -122,6 +180,7 @@ const loop = now => {
   if (T.Stream.mode === 'usb' && now - T.Stream.lastMsg > 6000) T.Stream.setLink('usbwait');
 };
 // start (boot.js): boot bar (link, section radio, data, scene), then the splash, then the section
-let first = 'ble'; try { first = localStorage.getItem('view') || 'ble'; } catch (e) {}
+let first = 'hq'; try { first = localStorage.getItem('view') || 'hq'; } catch (e) {}
+if (first === 'ov') first = 'hq';
 if (T.boot) T.boot(first); else App.go(first);
 requestAnimationFrame(loop);

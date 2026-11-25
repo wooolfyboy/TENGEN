@@ -7,9 +7,8 @@ T.boot = (first) => {
   const box = document.getElementById('boot'), cv = document.getElementById('bootCv');
   // boot and choice run on every page open; with reduced motion (system setting) the splash is skipped
   if (new URLSearchParams(location.search).has('noboot')) { box.remove(); T.app.go((T.views.find(v => v.id === first) || T.views[0]).id); return; }   // for development
-  // a full start always leads to Bluetooth > City (warmed up on the choice screen)
-  const view = T.views.find(v => v.id === 'ble') || T.views[0];
-  try { localStorage.setItem('sub_ble', '1'); } catch (e) {}
+  // a full start leads to HQ (with BLE already warming up on the choice screen)
+  const view = T.views.find(v => v.id === first) || T.views.find(v => v.id === 'hq') || T.views[0];
   const g = cv.getContext('2d'), MS = 2700;
   let t0 = 0;
   const seg = (t, a, b) => t <= a ? 0 : t >= b ? 1 : (t - a) / (b - a), eo = x => 1 - Math.pow(1 - T.clamp(x), 3);

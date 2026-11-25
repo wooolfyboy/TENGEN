@@ -24,8 +24,50 @@
 #include "probe/ir.h"
 #include "probe/nfc.h"
 
-// card order in the main menu
-static const Section* const SECTIONS[] = { &bleSection, &wifiSection, &subghzSection, &soundSection, &irSection, &nfcSection, &webSection, &pcSection, &gallerySection, &settingsSection };
+// combined IR · NFC section so the main menu stays compact
+static int s_probeScr = 0;
+static void probeSubtitle(char* out, size_t n) {
+  if (g_ir.have) snprintf(out, n, "IR:%s", g_ir.last.proto);
+  else if (g_nfc.taps) snprintf(out, n, "%lu NFC", (unsigned long)g_nfc.taps);
+  else snprintf(out, n, "IR / NFC");
+}
+static void probeEnter() {}
+static void probeLeave() { irStop(); nfcStop(); }
+static void probeScreenInfo(int i, SubItem& it) {
+  if (i == 0) {
+    it.name = L("IR Remote", "ИК-пульт");
+    it.desc = L("38 kHz receiver", "приёмник 38 кГц");
+    irSection.subtitle(it.value, sizeof(it.value));
+  } else {
+    it.name = L("NFC Card", "NFC-карта");
+    it.desc = L("13.56 MHz reader", "считыватель 13.56 МГц");
+    nfcSection.subtitle(it.value, sizeof(it.value));
+  }
+}
+static int  probeScreenNow() { return s_probeScr; }
+static void probeOpen(int i) {
+  s_probeScr = i ? 1 : 0;
+  if (s_probeScr == 0) { nfcStop(); irStart(); }
+  else                 { irStop(); nfcStart(); }
+}
+static void probeClose() { irStop(); nfcStop(); }
+static void probeClick() { if (s_probeScr == 0) irSection.click(); else nfcSection.click(); }
+static void probeRotate(int d) { if (s_probeScr == 0 && irSection.rotate) irSection.rotate(d); else if (s_probeScr == 1 && nfcSection.rotate) nfcSection.rotate(d); }
+static void probeTick(uint32_t now) { if (s_probeScr == 0) irSection.tick(now); else nfcSection.tick(now); }
+static void probeDraw(uint32_t now) { if (s_probeScr == 0) irSection.draw(now); else nfcSection.draw(now); }
+
+static const Section probeSection = {
+  LP("IR·NFC", "ИК·NFC"), 200, 140, 220, iconRemote, probeSubtitle,
+  probeEnter, probeLeave,
+  2, probeScreenInfo, probeScreenNow, probeOpen, probeClose,
+  probeClick, probeRotate, nullptr, probeTick, probeDraw,
+};
+
+// card order in the main menu (most-used 5 fit on the first screen without scrolling)
+static const Section* const SECTIONS[] = {
+  &bleSection, &wifiSection, &webSection, &pcSection, &gallerySection,
+  &subghzSection, &soundSection, &probeSection, &settingsSection
+};
 static const int N_SECTIONS = sizeof(SECTIONS) / sizeof(SECTIONS[0]);
 
 static int  s_cur = -1;          // open section; -1 = main menu
