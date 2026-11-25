@@ -120,9 +120,10 @@ void sensRxTick(uint32_t now, int rssi) {
   }
   // silence after the last pulse: close the packet by time (there may be no next edge)
   if (s_havePulse || s_train.n) {
-    uint32_t quiet = micros() - s_lastEdge;
+    uint32_t last = s_lastEdge;                                  // sample volatile timestamp before micros()
+    int32_t quiet = (int32_t)(micros() - last);                  // signed delta avoids uint32 underflow if ISR fires in between
     bool low = !((REG_READ(GPIO_IN_REG) >> CC_GDO0) & 1);
-    if (low && quiet > TRAIN_END_US) {
+    if (low && quiet > (int32_t)TRAIN_END_US) {
       if (s_havePulse) segment(false, 65535, now);
       else finish(now);
     }

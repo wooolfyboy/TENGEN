@@ -12,7 +12,7 @@
 // --- wheel: quadrature decoder in the ISR ---
 // Transition table (prev AB << 2 | new) -> -1/0/+1; 4 transitions = one click.
 // Bounce gives invalid transitions (0) and cancels itself.
-static const int8_t TBL[16] = { 0,-1, 1, 0,  1, 0, 0,-1, -1, 0, 0, 1,  0, 1,-1, 0 };
+static const DRAM_ATTR int8_t TBL[16] = { 0,-1, 1, 0,  1, 0, 0,-1, -1, 0, 0, 1,  0, 1,-1, 0 };
 static volatile uint8_t s_prev = 3;
 static volatile int8_t  s_accum = 0;
 static std::atomic<int> s_steps{0};
@@ -23,8 +23,8 @@ static void IRAM_ATTR encIsr() {
   if (cur == s_prev) return;
   s_accum += TBL[(s_prev << 2) | cur];
   s_prev = cur;
-  if (s_accum >= 4)       { s_steps++; s_accum = 0; }
-  else if (s_accum <= -4) { s_steps--; s_accum = 0; }
+  if (s_accum >= 4)       { s_steps.fetch_add(1, std::memory_order_relaxed); s_accum = 0; }
+  else if (s_accum <= -4) { s_steps.fetch_sub(1, std::memory_order_relaxed); s_accum = 0; }
 }
 
 void inputBegin() {

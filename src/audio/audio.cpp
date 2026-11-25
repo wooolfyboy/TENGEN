@@ -58,7 +58,8 @@ struct MicBlock { float level; float bandDb[AU_BANDS]; int16_t wave[AU_WAVE]; fl
 static MicBlock s_blk;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static volatile bool s_micRun = false;
-static TaskHandle_t s_micTask = nullptr;
+static volatile TaskHandle_t s_micTask = nullptr;
+static SemaphoreHandle_t s_micDone = nullptr;
 static i2s_chan_handle_t s_rx = nullptr, s_tx = nullptr;   // microphone (I2S0, PDM) and speaker (I2S1)
 static uint8_t s_bandLo[AU_BANDS], s_bandHi[AU_BANDS];   // band edges in FFT bins
 
@@ -91,7 +92,8 @@ static void micTask(void*) {
   for (int i = 0; i < N; i++) win[i] = 0.5f - 0.5f * cosf(2 * PI * i / (N - 1));   // Hann window
   while (s_micRun) {
     size_t got = 0;
-    i2s_channel_read(s_rx, buf, sizeof(buf), &got, 200);
+    i2s_channel_read(s_rx, buf, sizeof(buf), &got, 50);
+    if (!s_micRun) break;
     if (got < sizeof(buf)) { g_micDiag.timeouts++; continue; }
     float mean = 0;
     int rawPeak = 0;
@@ -126,6 +128,7 @@ static void micTask(void*) {
     portEXIT_CRITICAL(&s_mux);
   }
   s_micTask = nullptr;
+  if (s_micDone) xSemaphoreGive(s_micDone);
   vTaskDelete(nullptr);
 }
 
@@ -154,15 +157,23 @@ static bool micStart(int slot) {
     int b0 = max(1, (int)(f0 * N / SR)), b1 = max(b0, (int)(f1 * N / SR));
     s_bandLo[k] = (uint8_t)min(b0, N / 2 - 1); s_bandHi[k] = (uint8_t)min(b1, N / 2 - 1);
   }
+  if (!s_micDone) s_micDone = xSemaphoreCreateBinary();
+  if (s_micDone) xSemaphoreTake(s_micDone, 0);   // clear any stale signal
   s_micRun = true;
-  xTaskCreatePinnedToCore(micTask, "mic", 6144, nullptr, 2, &s_micTask, 1);
+  TaskHandle_t h = nullptr;
+  if (xTaskCreatePinnedToCore(micTask, "mic", 6144, nullptr, 2, &h, 1) != pdPASS) {
+    s_micRun = false;
+    i2s_channel_disable(s_rx); i2s_del_channel(s_rx); s_rx = nullptr;
+    return false;
+  }
+  s_micTask = h;
   return true;
 }
 
 static void micStop() {
   if (!s_micRun) return;
   s_micRun = false;
-  for (int i = 0; i < 40 && s_micTask; i++) delay(10);   // wait for the task to exit
+  if (s_micDone) xSemaphoreTake(s_micDone, pdMS_TO_TICKS(500));
   if (s_rx) { i2s_channel_disable(s_rx); i2s_del_channel(s_rx); s_rx = nullptr; }
 }
 

@@ -99,7 +99,7 @@ $('go').onclick = async () => {
     const m = String(e && e.message || e);
     if (/open|busy|access|lock/i.test(m)) st(T.busy, 'bad');
     else st(T.fail1 + m + T.fail2, 'bad');
-    try { await transport && transport.disconnect(); } catch (e2) {}
+    try { if (transport) await transport.disconnect(); } catch (e2) {}
     $('go').disabled = false;
   }
 };

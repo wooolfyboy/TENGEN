@@ -218,7 +218,7 @@ void bleBegin() {
 
 void bleRadioOn() {
   if (g_bleActive) return;
-  NimBLEDevice::getScan()->start(0, false);
+  if (!NimBLEDevice::getScan()->start(0, false)) return;
   g_bleActive = true;
   g_base = -1;                              // re-learn the event baseline
   g_cooldownMs = millis() + 10000;          // and stay quiet while the list fills
@@ -323,45 +323,44 @@ bool bleLabelSet(uint32_t id, const char* name, bool& stable) {
 // ---------- every frame: addresses -> physical devices ----------
 void bleUpdate(uint32_t now) {
   labelsLoad();
-  // do not recreate map nodes every frame (less heap churn): zero them, drop the missing ones below
-  for (auto& kv : g_ents) memset(&kv.second, 0, sizeof(Ent));
-  g_sensSnap.clear();
-  g_snap.clear();
   if (g_detFor != g_sel) { g_detValid = false; g_detFor = g_sel; }
   bool wantDetail = bleIs(M_LIST) && g_detail;
   uint32_t detT = 0;
   int raw = 0;
-  if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
-    int thr = RANGES[g_range].dbm;
-    for (auto it = g_seen.begin(); it != g_seen.end(); ) {
-      if (msSince(now, it->second.t) > REMEMBER_MS) { it = g_seen.erase(it); continue; }
-      Dev& d = it->second;
-      // range filter with hysteresis + drop single-packet devices
-      if (!d.inRange && d.rssiS >= thr) d.inRange = true;
-      else if (d.inRange && d.rssiS < thr - RANGE_HYST_DB) d.inRange = false;
-      if (!d.inRange || d.pkts < MIN_PKTS) { ++it; continue; }
-      Ent& e = g_ents[d.ent];           // a new Ent is created zeroed
-      if (d.t >= e.t) { e.t = d.t; e.rssi = d.rssi; e.rssiS = d.rssiS; e.key = it->first; }
-      if (!e.first || d.first < e.first) e.first = d.first;
-      if (d.pkts > e.pkts) e.pkts = d.pkts;
-      if (e.nMacs < 255) e.nMacs++;                // uint8_t: do not wrap to 0
-      if (d.type != T_UNKNOWN) e.type = d.type;
-      if (d.vscore > e.vscore) { e.cat = d.cat; e.vkind = d.vkind; e.vcode = d.vcode; e.vscore = d.vscore; }
-      if (d.name[0] && !e.name[0]) memcpy(e.name, d.name, sizeof(e.name));
-      if (g_nLabels > 0 && !e.label[0]) { const char* l = labelFor(d.mac); if (l) strlcpy(e.label, l, sizeof(e.label)); }
-      if (wantDetail && d.ent == g_sel && d.t >= detT) { g_detDev = d; detT = d.t; g_detValid = true; }
-      ++it;
-    }
-    raw = (int)g_seen.size();
-    g_sensCount = 0;
-    for (auto it = g_sens.begin(); it != g_sens.end(); ) {
-      if (msSince(now, it->second.t) > SENSOR_REMEMBER_MS) { it = g_sens.erase(it); continue; }
-      g_sensCount++;
-      if (bleIs(M_WEATHER)) g_sensSnap.push_back(it->second);
-      ++it;
-    }
-    xSemaphoreGive(g_lock);
+  if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(100)) != pdTRUE) return;   // keep previous frame on contention
+  // do not recreate map nodes every frame (less heap churn): zero them, drop the missing ones below
+  for (auto& kv : g_ents) memset(&kv.second, 0, sizeof(Ent));
+  g_sensSnap.clear();
+  g_snap.clear();
+  int thr = RANGES[g_range].dbm;
+  for (auto it = g_seen.begin(); it != g_seen.end(); ) {
+    if (msSince(now, it->second.t) > REMEMBER_MS) { it = g_seen.erase(it); continue; }
+    Dev& d = it->second;
+    // range filter with hysteresis + drop single-packet devices
+    if (!d.inRange && d.rssiS >= thr) d.inRange = true;
+    else if (d.inRange && d.rssiS < thr - RANGE_HYST_DB) d.inRange = false;
+    if (!d.inRange || d.pkts < MIN_PKTS) { ++it; continue; }
+    Ent& e = g_ents[d.ent];           // a new Ent is created zeroed
+    if (d.t >= e.t) { e.t = d.t; e.rssi = d.rssi; e.rssiS = d.rssiS; e.key = it->first; }
+    if (!e.first || d.first < e.first) e.first = d.first;
+    if (d.pkts > e.pkts) e.pkts = d.pkts;
+    if (e.nMacs < 255) e.nMacs++;                // uint8_t: do not wrap to 0
+    if (d.type != T_UNKNOWN) e.type = d.type;
+    if (d.vscore > e.vscore) { e.cat = d.cat; e.vkind = d.vkind; e.vcode = d.vcode; e.vscore = d.vscore; }
+    if (d.name[0] && !e.name[0]) memcpy(e.name, d.name, sizeof(e.name));
+    if (g_nLabels > 0 && !e.label[0]) { const char* l = labelFor(d.mac); if (l) strlcpy(e.label, l, sizeof(e.label)); }
+    if (wantDetail && d.ent == g_sel && d.t >= detT) { g_detDev = d; detT = d.t; g_detValid = true; }
+    ++it;
   }
+  raw = (int)g_seen.size();
+  g_sensCount = 0;
+  for (auto it = g_sens.begin(); it != g_sens.end(); ) {
+    if (msSince(now, it->second.t) > SENSOR_REMEMBER_MS) { it = g_sens.erase(it); continue; }
+    g_sensCount++;
+    if (bleIs(M_WEATHER)) g_sensSnap.push_back(it->second);
+    ++it;
+  }
+  xSemaphoreGive(g_lock);
   for (auto it = g_ents.begin(); it != g_ents.end(); )   // not seen this frame: gone
     if (it->second.t == 0) it = g_ents.erase(it); else ++it;
 
@@ -629,7 +628,7 @@ void bleLowDuty(bool low) {
   bool was = g_bleActive;
   if (was) s->stop();
   s->setWindow(low ? 45 : 99);
-  if (was) s->start(0, false);
+  if (was && !s->start(0, false)) g_bleActive = false;
 }
 
 // for the tablet (SSE stream): compact, arrays instead of objects, up to 80 devices

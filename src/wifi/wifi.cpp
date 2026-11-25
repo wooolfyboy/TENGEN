@@ -200,6 +200,13 @@ static void wifiScanTick(uint32_t now) {
     uint64_t k = macKey(r->bssid);
     auto it = g_aps.find(k);
     if (it == g_aps.end()) {
+      static const size_t AP_MAX = 250;
+      if (g_aps.size() >= AP_MAX) {
+        auto oldest = g_aps.begin();
+        for (auto j = g_aps.begin(); j != g_aps.end(); ++j)
+          if (msSince(now, j->second.t) > msSince(now, oldest->second.t)) oldest = j;
+        g_aps.erase(oldest);
+      }
       Ap a; memset(&a, 0, sizeof(a));
       memcpy(a.bssid, r->bssid, 6);
       a.first = now; a.rssi = a.rssiS = a.rmin = a.rmax = r->rssi;

@@ -23,6 +23,7 @@ import http.server
 import json
 import re
 import os
+import secrets
 import socketserver
 import sys
 import threading
@@ -334,7 +335,7 @@ def zoom_js(z):
         z = min(1.5, max(0.8, float(z)))
     except Exception:
         z = 1.0
-    return "document.documentElement.style.zoom=%s;window.dispatchEvent(new Event('resize'));" % ("" if z == 1 else "'%g'" % z)
+    return "document.documentElement.style.zoom=%s;window.dispatchEvent(new Event('resize'));" % ("''" if z == 1 else "'%g'" % z)
 
 
 def cfg_save(c):
@@ -674,7 +675,8 @@ class Monitor:
 # ============================================================
 BRIDGE = """<script>
 window.TENGEN_DESKTOP={mode:'usb'};
-(function(){var f=window.fetch.bind(window);var t=function(u){return f(u,{cache:'no-store'}).then(function(r){return r.text()})};
+(function(){var f=window.fetch.bind(window),H={'X-Tengen-Token':'%TOKEN%'};
+var t=function(u){return f(u,{cache:'no-store',headers:H}).then(function(r){return r.text()})};
 window.TengenUSB={want:function(q){return t('/__link/want?q='+encodeURIComponent(q))},
  api:function(p){return t('/__link/api?p='+encodeURIComponent(p))},
  poll:function(){return t('/__link/poll')}};})();
@@ -773,9 +775,11 @@ button:hover,button.on{border-color:var(--acc);box-shadow:0 0 18px rgba(255,255,
 <div class="ppb"><button id="ppt">%PP_TEST%</button><button id="ppc">%PP_DONE%</button></div></div></div>
 <script>
 (function(){
+var TK='%TOKEN%',H={'X-Tengen-Token':TK};
+function af(u){return fetch(u,{cache:'no-store',headers:H})}
 var X=%PP_TX%;
 var L=document.getElementById('ppl'),P=null;
-function set(k,v){fetch('/__app/prefs_set?k='+encodeURIComponent(k)+'&v='+encodeURIComponent(JSON.stringify(v))).then(function(r){return r.json()}).then(function(d){P=d.prefs;draw()})}
+function set(k,v){af('/__app/prefs_set?k='+encodeURIComponent(k)+'&v='+encodeURIComponent(JSON.stringify(v))).then(function(r){return r.json()}).then(function(d){P=d.prefs;draw()})}
 function row(t,h,el){var d=document.createElement('div');d.className='it';var sp=document.createElement('span');sp.textContent=t;if(h){var sm=document.createElement('small');sm.textContent=h;sp.appendChild(sm)}d.appendChild(sp);d.appendChild(el);L.appendChild(d)}
 function tog(k,v){var b=document.createElement('button');b.className='tg'+(v?' on':'');b.setAttribute('aria-label',k);b.onclick=function(){set(k,!v)};return b}
 function num(k,v,mn,mx,st){var i=document.createElement('input');i.type='number';i.min=mn;i.max=mx;i.step=st;i.value=v;i.onchange=function(){var x=Math.min(mx,Math.max(mn,+i.value));set(k,x)};return i}
@@ -807,19 +811,21 @@ function draw(){L.innerHTML='';var p=P;
  row(r('autostart')[0],r('autostart')[1],tog('autostart',p.autostart));
  if(p.autostart)row(r('start_tray')[0],r('start_tray')[1],tog('start_tray',p.start_tray));
 }
-function open_(){fetch('/__app/prefs').then(function(r){return r.json()}).then(function(d){P=d.prefs;draw();document.getElementById('pp').classList.add('on')})}
+function open_(){af('/__app/prefs').then(function(r){return r.json()}).then(function(d){P=d.prefs;draw();document.getElementById('pp').classList.add('on')})}
 document.getElementById('pb2').onclick=open_;
 document.getElementById('ppc').onclick=function(){document.getElementById('pp').classList.remove('on')};
-document.getElementById('ppt').onclick=function(){fetch('/__app/test_popup')};
+document.getElementById('ppt').onclick=function(){af('/__app/test_popup')};
 if(location.search.indexOf('prefs')>=0)open_();
 })();
 </script><script>
-var last='%LAST%',auto=%AUTO%,cd=3,timer=null;
+var TK='%TOKEN%',H={'X-Tengen-Token':TK};
+function af(u){return fetch(u,{cache:'no-store',headers:H})}
+var last=%LAST%,auto=%AUTO%,cd=3,timer=null;
 var st=document.getElementById('st');
-function go(m){clearInterval(timer);st.textContent='…';fetch('/__app/start?mode='+m).then(function(r){return r.text()}).then(function(t){if(t)st.textContent=t});}
+function go(m){clearInterval(timer);st.textContent='…';af('/__app/start?mode='+encodeURIComponent(m)).then(function(r){return r.text()}).then(function(t){if(t)st.textContent=t});}
 document.querySelectorAll('button[data-m]').forEach(function(b){if(b.dataset.m===last)b.classList.add('on');b.onclick=function(){go(b.dataset.m)}});
 if(auto&&last){timer=setInterval(function(){if(cd<=0){go(last);return}st.textContent='%COUNTDOWN%'.replace('{m}',last.toUpperCase()).replace('{n}',cd);cd--},1000);}
-setInterval(function(){fetch('/__app/status').then(function(r){return r.json()}).then(function(s){if(s.msg)st.textContent=s.msg;document.getElementById('pb').style.width=(s.pct||0)+'%'}).catch(function(){})},300);
+setInterval(function(){af('/__app/status').then(function(r){return r.json()}).then(function(s){if(s.msg)st.textContent=s.msg;document.getElementById('pb').style.width=(s.pct||0)+'%'}).catch(function(){})},300);
 </script></body></html>"""
 
 
@@ -842,6 +848,7 @@ class App:
         self.busy = False
         self.first = True
         self.port = PORT
+        self.token = secrets.token_hex(16)
 
     @property
     def lang(self):
@@ -858,7 +865,8 @@ class App:
     def launcher_html(self, last, auto):
         rep = {"%LANG%": self.lang, "%SUB%": self.t("sub"), "%USB_S%": self.t("usb_s"), "%WIFI_S%": self.t("wifi_s"),
                "%AUTO_T%": self.t("auto"), "%AUTO_S%": self.t("auto_s"), "%HINT%": self.t("hint"),
-               "%COUNTDOWN%": self.t("countdown").replace("'", "\\'"), "%LAST%": last, "%AUTO%": auto,
+               "%COUNTDOWN%": self.t("countdown").replace("'", "\\'"), "%LAST%": json.dumps(last), "%AUTO%": auto,
+               "%TOKEN%": self.token,
                "%PP_BTN%": self.t("pp_btn"), "%PP_H%": self.t("pp_h"), "%PP_HINT%": self.t("pp_hint"),
                "%PP_TEST%": self.t("pp_test"), "%PP_DONE%": self.t("pp_done"),
                "%PP_TX%": json.dumps(PP_TX[self.lang], ensure_ascii=False).replace("</", "<\\/")}
@@ -1072,7 +1080,7 @@ class App:
     def full_html(self):
         h = self.html or "<html><body style='background:#000;color:#fff'>%s</body></html>" % self.t("no_page")
         i = h.find("<head>")
-        inj = BRIDGE + "<script>" + KEYS + "</script>"
+        inj = BRIDGE.replace("%TOKEN%", self.token) + "<script>" + KEYS + "</script>"
         return h[:i + 6] + inj + h[i + 6:] if i >= 0 else inj + h
 
 
@@ -1088,15 +1096,22 @@ def make_handler(app):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Cache-Control", "no-store")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Content-Length", str(len(b)))
             self.end_headers()
             self.wfile.write(b)
+
+        def _auth_ok(self, path):
+            if path == "/__app/show" and not self.headers.get("Origin"):
+                return True                                # local single_instance() check from second process
+            return secrets.compare_digest(self.headers.get("X-Tengen-Token") or "", app.token)
 
         def do_GET(self):
             u = urllib.parse.urlparse(self.path)
             q = urllib.parse.parse_qs(u.query)
             p = u.path
+            if (p.startswith("/__link/") or p.startswith("/__app/")) and not self._auth_ok(p):
+                self._send('{"ok":false,"err":"forbidden"}', code=403)
+                return
             if p == "/":
                 last = app.cfg.get("mode", "")
                 auto = "true" if ("auto" in q or app.first) and last else "false"

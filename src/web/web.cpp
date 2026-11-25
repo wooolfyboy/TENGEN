@@ -8,7 +8,9 @@
 #include <DNSServer.h>
 #include <qrcode.h>
 #include <Update.h>
+#include <Preferences.h>
 #include <esp_ota_ops.h>
+#include <esp_random.h>
 #include "core/jsonutil.h"
 #include "core/timeutil.h"
 #include "web/web.h"
@@ -77,12 +79,25 @@ static void qrStore(esp_qrcode_handle_t q) {
   for (int y = 0; y < n; y++) for (int x = 0; x < n; x++) s_qr[y * n + x] = esp_qrcode_get_module(q, x, y) ? 1 : 0;
 }
 
+static void otaFreeHead() {
+  if (s_otaHead) { free(s_otaHead); s_otaHead = nullptr; }
+}
+
 static void makeNames() {
   uint8_t m[6]; WiFi.macAddress(m);
   snprintf(s_ssid, sizeof(s_ssid), "TENGEN-%02X%02X", m[4], m[5]);
-  uint32_t h = 2166136261u;                       // password: 8 digits from the MAC (stable)
-  for (int i = 0; i < 6; i++) h = (h ^ m[i]) * 16777619u;
-  snprintf(s_pass, sizeof(s_pass), "%08lu", (unsigned long)(h % 100000000UL));
+  // Random 8-digit WPA2 password generated once per device and stored in NVS
+  // (not derivable from the public MAC broadcast in Wi-Fi beacons).
+  Preferences p;
+  p.begin("web", false);
+  String saved = p.getString("pass", "");
+  if (saved.length() == 8) {
+    strlcpy(s_pass, saved.c_str(), sizeof(s_pass));
+  } else {
+    snprintf(s_pass, sizeof(s_pass), "%08lu", (unsigned long)(esp_random() % 100000000UL));
+    p.putString("pass", s_pass);
+  }
+  p.end();
   char wifiQr[80];
   snprintf(wifiQr, sizeof(wifiQr), "WIFI:T:WPA;S:%s;P:%s;;", s_ssid, s_pass);
   esp_qrcode_config_t cfg = { qrStore, 6, ESP_QRCODE_ECC_LOW };
@@ -215,8 +230,11 @@ static void otaUpload() {
       s_otaHeadN += k; d += k; n -= k;
       if (s_otaHeadN < OTA_PROBE) return;
       bool merged = s_otaHead[0x8000] == 0xAA && s_otaHead[0x8001] == 0x50;   // partition table at 0x8000
+      bool ok = true;
       if (merged) s_otaSkip = OTA_APP_OFS - OTA_PROBE;                        // skip the rest up to 0x10000
-      else if (!otaWrite(s_otaHead, OTA_PROBE)) return;
+      else ok = otaWrite(s_otaHead, OTA_PROBE);
+      otaFreeHead();                                                          // release 32 KB probe buffer immediately
+      if (!ok) return;
     }
     if (n && !otaWrite(d, n)) return;
     static uint32_t lastDraw = 0;
@@ -226,13 +244,15 @@ static void otaUpload() {
       otaDrawProgress();
     }
   } else if (up.status == UPLOAD_FILE_END) {
-    if (!s_otaErr.length() && s_otaHeadN < OTA_PROBE && s_otaHead)   // file smaller than 32 KB
+    otaFreeHead();
+    if (!s_otaErr.length() && s_otaHeadN < OTA_PROBE)                // file smaller than 32 KB
       s_otaErr = "file is too small";
     if (!s_otaErr.length() && !Update.end(true)) s_otaErr = Update.errorString();
     if (s_otaErr.length() && s_otaStarted) Update.abort();
     s_otaPct = s_otaErr.length() ? -2 : 100;
     otaDrawProgress();
   } else if (up.status == UPLOAD_FILE_ABORTED) {
+    otaFreeHead();
     if (s_otaStarted) Update.abort();
     s_otaErr = "upload interrupted"; s_otaPct = -2;
     otaDrawProgress();
@@ -240,10 +260,11 @@ static void otaUpload() {
 }
 
 static void otaDone() {
+  otaFreeHead();
   s_reqs++;
   bool ok = s_otaPct == 100 && !s_otaErr.length();
   String o = "{\"ok\":"; o += ok ? "true" : "false";
-  o += ",\"err\":\""; o += s_otaErr; o += "\"}";
+  o += ",\"err\":"; jsonStr(o, s_otaErr.c_str()); o += '}';
   s_srv->client().setNoDelay(true);
   s_srv->send(200, "application/json", o);
   if (ok) {                                        // reply to the phone and reboot into the new firmware
@@ -586,6 +607,7 @@ static void webStart() {
 
 static void webStop() {
   if (!s_on) return;
+  otaFreeHead();
   if (s_srv) { s_srv->stop(); delete s_srv; s_srv = nullptr; }
   for (auto& k : s_sse) { if (k.on) k.c.stop(); k = SseCli(); }
   if (s_sseSrv) { s_sseSrv->end(); delete s_sseSrv; s_sseSrv = nullptr; }

@@ -34,6 +34,7 @@ void macStr(const uint8_t* m, char* out) {   // m = least significant byte first
 
 // shorten to px width (font), appending ".."
 void fitText(const char* src, char* dst, size_t cap, int px, int font) {
+  if (!cap) return;
   strncpy(dst, src, cap - 1); dst[cap - 1] = 0;
   size_t n = strlen(dst);
   if (strlen(src) > n) {                                      // copy truncated it: don't leave half a UTF-8 character
@@ -47,12 +48,14 @@ void fitText(const char* src, char* dst, size_t cap, int px, int font) {
     dst[n] = 0;
   }
   if (txtW(dst, font) <= px) return;
+  if (cap < 4) { dst[0] = 0; return; }
   while (n > 1) {
     n--;                                                      // drop the whole last character (UTF-8)
     while (n > 0 && ((uint8_t)dst[n] & 0xC0) == 0x80) n--;
     dst[n] = 0;
+    if (n + 2 >= cap) continue;                               // ensure room for ".." + NUL inside dst[cap]
     char tmp[96]; snprintf(tmp, sizeof(tmp), "%s..", dst);
-    if (txtW(tmp, font) <= px) { strcpy(dst, tmp); return; }
+    if (txtW(tmp, font) <= px) { strlcpy(dst, tmp, cap); return; }
   }
 }
 

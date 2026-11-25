@@ -12,6 +12,7 @@
 #include "core/leds.h"
 #include "core/settings.h"
 #include "core/ui.h"
+#include "core/crumb.h"
 
 uint32_t g_powerHold = 0;
 static uint32_t s_lastTouch = 0;
@@ -35,7 +36,7 @@ bool     g_ignoreUser = false;
 
 void sleepNow() {
   // wait for the button release, otherwise the board wakes right away
-  while (digitalRead(PIN_USER_KEY) == LOW) delay(10);
+  while (digitalRead(PIN_USER_KEY) == LOW) { crumbFeed(); delay(10); }
   delay(50);
   pinMode(TFT_BL, OUTPUT);       digitalWrite(TFT_BL, LOW);
   pinMode(BOARD_PWR_EN, OUTPUT); digitalWrite(BOARD_PWR_EN, LOW);   // cut power to peripherals
@@ -53,6 +54,7 @@ void powerOff() {
   strip.clear(); strip.show();
   uint32_t t0 = millis();
   for (;;) {
+    crumbFeed();
     uint32_t t = millis() - t0;
     if (t > 1450) break;
     shutFrame(t);
