@@ -55,19 +55,19 @@ static const uint32_t HOP_MS = 200;
 struct PEv { uint8_t kind; uint8_t a[6]; uint8_t b[6]; };   // 1: data (a=device, b=network), 2: probe (a=source)
 #define PEV_N 128
 PEv g_pev[PEV_N];
-volatile uint16_t g_pevHead = 0, g_pevTail = 0;
+std::atomic<uint16_t> g_pevHead{0}, g_pevTail{0};
 
 // devices in networks and "looking for Wi-Fi" (RAM only, count only)
 static const uint32_t STA_REMEMBER_MS = 120000;
 static const size_t   STA_MAX = 500;
 
 static inline void IRAM_ATTR pushEv(uint8_t kind, const uint8_t* a, const uint8_t* b) {
-  uint16_t h = g_pevHead, n = (h + 1) % PEV_N;
-  if (n == g_pevTail) return;                    // buffer full: drop
+  uint16_t h = g_pevHead.load(std::memory_order_relaxed), n = (h + 1) % PEV_N;
+  if (n == g_pevTail.load(std::memory_order_acquire)) return;   // buffer full: drop
   PEv& e = g_pev[h];
   e.kind = kind;
   for (int i = 0; i < 6; i++) { e.a[i] = a[i]; e.b[i] = b ? b[i] : 0; }
-  g_pevHead = n;
+  g_pevHead.store(n, std::memory_order_release);
 }
 
 static void IRAM_ATTR promCb(void* buf, wifi_promiscuous_pkt_type_t type) {
@@ -176,7 +176,7 @@ static void wifiOrderUpdate(bool force);
 static void wifiScanTick(uint32_t now) {
   if (!g_wOn || g_prom) return;
   if (!g_scanning) {
-    if (now < g_scanRetryMs) return;
+    if ((int32_t)(now - g_scanRetryMs) < 0) return;
     g_scanCh = 0;
     uint32_t perCh = 150;
     if (g_wMode == W_FIND) {
@@ -256,10 +256,12 @@ static void wifiScanTick(uint32_t now) {
 // ---------- capture: hop channels, count packets, noise and devices ----------
 static void wifiHopTick(uint32_t now) {
   if (!g_prom) return;
-  // drain handler events
-  while (g_pevTail != g_pevHead) {
-    PEv e = g_pev[g_pevTail];
-    g_pevTail = (g_pevTail + 1) % PEV_N;
+  // drain handler events (acquire/release safe across Core 0 -> Core 1)
+  uint16_t tail = g_pevTail.load(std::memory_order_relaxed);
+  while (tail != g_pevHead.load(std::memory_order_acquire)) {
+    PEv e = g_pev[tail];
+    tail = (tail + 1) % PEV_N;
+    g_pevTail.store(tail, std::memory_order_release);
     if (e.a[0] & 0x01) continue;                       // group addresses are not devices
     uint64_t a = macKey(e.a);
     if (e.kind == 1) {
@@ -282,8 +284,8 @@ static void wifiHopTick(uint32_t now) {
   g_lastMgmt = m; g_lastData = d;
   g_ppsMgmt[g_hopCh] = g_ppsMgmt[g_hopCh] * 0.4f + sm * 0.6f;
   g_ppsData[g_hopCh] = g_ppsData[g_hopCh] * 0.4f + sd * 0.6f;
-  int32_t nfs = g_nfSum; uint32_t nfc = g_nfCnt;
-  g_nfSum = 0; g_nfCnt = 0;
+  int32_t nfs = g_nfSum.exchange(0);
+  uint32_t nfc = g_nfCnt.exchange(0);
   if (nfc > 0) {
     float nf = (float)nfs / nfc;
     g_noise[g_hopCh] = g_noise[g_hopCh] == 0 ? nf : g_noise[g_hopCh] * 0.5f + nf * 0.5f;
@@ -310,24 +312,34 @@ static void wifiHopTick(uint32_t now) {
 static void wifiOrderUpdate(bool force) {
   bool frozen = g_wDetail || (millis() - g_wTouch < 4000);
   if (frozen && !force && !g_wOrder.empty()) return;
-  std::vector<uint64_t> o;
+  struct Item { uint64_t k; int8_t rs; };
+  static std::vector<Item> o;
+  o.clear(); o.reserve(g_aps.size());
   int minDbm = RANGES[g_wRange].dbm;               // Wi-Fi > Range setting
-  auto ok = [&](uint64_t k) { auto it = g_aps.find(k); return it != g_aps.end() && (it->second.rssiS >= minDbm || k == g_wSel); };
-  for (uint64_t k : g_wOrder) if (ok(k)) o.push_back(k);
-  auto rs = [&](uint64_t k) { return (int)g_aps[k].rssiS; };
+  for (uint64_t k : g_wOrder) {
+    auto it = g_aps.find(k);
+    if (it != g_aps.end() && (it->second.rssiS >= minDbm || k == g_wSel))
+      o.push_back({ k, it->second.rssiS });
+  }
   for (size_t pass = 0; pass < o.size(); pass++) {
     bool sw = false;
     for (size_t i = 0; i + 1 < o.size(); i++)
-      if (rs(o[i + 1]) > rs(o[i]) + 6) { std::swap(o[i], o[i + 1]); sw = true; }
+      if (o[i + 1].rs > o[i].rs + 6) { std::swap(o[i], o[i + 1]); sw = true; }
     if (!sw) break;
   }
   for (auto& kv : g_aps) {
-    if (!ok(kv.first) || std::find(o.begin(), o.end(), kv.first) != o.end()) continue;
+    uint64_t k = kv.first;
+    int8_t r = kv.second.rssiS;
+    if (r < minDbm && k != g_wSel) continue;
+    bool seen = false;
+    for (const auto& x : o) if (x.k == k) { seen = true; break; }
+    if (seen) continue;
     size_t pos = 0;
-    while (pos < o.size() && rs(o[pos]) >= kv.second.rssiS) pos++;
-    o.insert(o.begin() + pos, kv.first);
+    while (pos < o.size() && o[pos].rs >= r) pos++;
+    o.insert(o.begin() + pos, { k, r });
   }
-  g_wOrder.swap(o);
+  g_wOrder.resize(o.size());
+  for (size_t i = 0; i < o.size(); i++) g_wOrder[i] = o[i].k;
 }
 
 static void wifiApplyMove() {

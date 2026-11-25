@@ -10,11 +10,19 @@
 #include "core/theme.h"
 #include "core/ui.h"
 
-// waterfall: v = dBm + 120; -110 almost black … -40 white
+// waterfall: v = dBm + 120 (0..110); -110 almost black … -40 white (cached 111-entry LUT per theme)
 static uint16_t wfColor(int v) {
-  float x = constrain((v - 10) / 70.0f, 0.0f, 1.0f);
-  if (x < 0.08f) return C_BG();
-  return heatV(x);
+  static uint16_t s_wfLut[111];
+  static int s_wfTheme = -1;
+  int curTheme = themeKurenai() ? 1 : 0;
+  if (s_wfTheme != curTheme) {
+    for (int i = 0; i <= 110; i++) {
+      float x = constrain((i - 10) / 70.0f, 0.0f, 1.0f);
+      s_wfLut[i] = x < 0.08f ? C_BG() : heatV(x);
+    }
+    s_wfTheme = curTheme;
+  }
+  return s_wfLut[constrain(v, 0, 110)];
 }
 
 // ============================================================

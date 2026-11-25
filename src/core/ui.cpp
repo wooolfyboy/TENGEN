@@ -40,11 +40,12 @@ void uiHeader(const char* title, const char* right, bool rightAlert) {
     txt(r, W - UI_M - 4, 6, 1);
   }
   if (themeKurenai()) { spr.fillRect(UI_M, 19, W - 2 * UI_M, 2, C_ACC()); return; }   // KURENAI: solid red line
-  // line under the header, fading to the right
+  // line under the header, fading to the right (16 fast horizontal segments instead of 304 pixel calls)
   uint16_t a = C_ACC();
-  for (int x = UI_M; x < W - UI_M; x++) {
-    float k = 1.0f - 0.85f * (x - UI_M) / (float)(W - 2 * UI_M);
-    spr.drawPixel(x, 19, scale565(a, (int)(k * 100)));
+  int span = W - 2 * UI_M;
+  for (int s = 0; s < 16; s++) {
+    int x0 = UI_M + s * span / 16, x1 = UI_M + (s + 1) * span / 16;
+    spr.drawFastHLine(x0, 19, x1 - x0, scale565(a, 100 - s * 85 / 15));
   }
 }
 

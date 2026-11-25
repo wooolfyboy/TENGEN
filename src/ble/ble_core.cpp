@@ -192,7 +192,7 @@ void bleSample(uint32_t now) {
   if (g_base < 0) g_base = c;                     // init
   int8_t ev = 0;
   float delta = c - g_base;
-  if (g_thresh > 0 && now >= g_cooldownMs) {
+  if (g_thresh > 0 && (int32_t)(now - g_cooldownMs) >= 0) {
     if (delta >= g_thresh)       { ev = +1; g_base = c; g_cooldownMs = now + 3000; }
     else if (delta <= -g_thresh) { ev = -1; g_base = c; g_cooldownMs = now + 3000; }
   }
@@ -398,25 +398,31 @@ static void listUpdate(uint32_t now) {
   //  - new devices go to their place, departed ones are removed.
   bool frozen = g_detail || (msSince(now, g_lastTouch) < ORDER_FREEZE);
   if (g_order.empty() || (!frozen && msSince(now, g_orderMs) >= ORDER_EVERY)) {
-    auto rs = [&](uint32_t id) { return g_ents[id].rssiS; };
-    std::vector<uint32_t> o;
-    o.reserve(g_ents.size());
-    for (uint32_t id : g_order) if (g_ents.count(id)) o.push_back(id);
+    struct Item { uint32_t id; int8_t rs; };
+    static std::vector<Item> o;
+    o.clear(); o.reserve(g_ents.size());
+    for (uint32_t id : g_order) {
+      auto it = g_ents.find(id);
+      if (it != g_ents.end()) o.push_back({ id, it->second.rssiS });
+    }
     for (size_t pass = 0; pass < o.size(); pass++) {
       bool sw = false;
       for (size_t i = 0; i + 1 < o.size(); i++)
-        if (rs(o[i + 1]) > rs(o[i]) + ORDER_HYST_DB) { std::swap(o[i], o[i + 1]); sw = true; }
+        if (o[i + 1].rs > o[i].rs + ORDER_HYST_DB) { std::swap(o[i], o[i + 1]); sw = true; }
       if (!sw) break;
     }
-    std::vector<uint32_t> fresh;
-    for (auto& kv : g_ents)
-      if (std::find(o.begin(), o.end(), kv.first) == o.end()) fresh.push_back(kv.first);
-    for (uint32_t id : fresh) {
+    for (auto& kv : g_ents) {
+      uint32_t id = kv.first;
+      bool seen = false;
+      for (const auto& x : o) if (x.id == id) { seen = true; break; }
+      if (seen) continue;
+      int8_t r = kv.second.rssiS;
       size_t pos = 0;
-      while (pos < o.size() && rs(o[pos]) >= rs(id)) pos++;
-      o.insert(o.begin() + pos, id);
+      while (pos < o.size() && o[pos].rs >= r) pos++;
+      o.insert(o.begin() + pos, { id, r });
     }
-    g_order.swap(o);
+    g_order.resize(o.size());
+    for (size_t i = 0; i < o.size(); i++) g_order[i] = o[i].id;
     g_orderMs = now;
   }
   int n = (int)g_order.size();

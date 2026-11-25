@@ -8,6 +8,7 @@
 #include "gallery/astro.h"
 #include "ble/ble.h"
 #include "ble/ble_model.h"
+#include "wifi/wifi.h"
 #include "subghz/subghz.h"
 #include "subghz/subghz_model.h"
 #include "subghz/sensors.h"
@@ -27,6 +28,7 @@ static bool s_mine = false, s_subOn = false, s_sndOn = false;
 void wxStart() {
   if (s_mine) return;
   s_mine = true;
+  wifiRadioOff();
   bleRadioOn();
   s_subOn = subWebUse(SUB_MONITOR, SUB_433);
   s_sndOn = audioWebUse();

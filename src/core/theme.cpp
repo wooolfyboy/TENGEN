@@ -49,8 +49,9 @@ static const Stop K_HEAT[] = {
 
 static uint16_t s_lut[256];
 static int      s_lutTheme = -1;
+static bool     s_rowsValid = false;
 bool themeKurenai() { return g_theme == THEME_KURENAI; }
-void themeChanged() { s_lutTheme = -1; }
+void themeChanged() { s_lutTheme = -1; s_rowsValid = false; }
 
 uint16_t C(uint8_t r, uint8_t g, uint8_t b) {
   if (s_lutTheme != g_theme) {
@@ -74,7 +75,7 @@ uint16_t C_SEAL()  { return C_ACC(); }
 // selected card / row: DENKO = dark panel with teal; KURENAI = white plate with black
 uint16_t C_SELBG()  { return themeKurenai() ? C_HOT() : UI_PANEL(); }
 uint16_t C_SELFG()  { return themeKurenai() ? C_BG()  : C_HOT(); }
-uint16_t C_SELACC() { return themeKurenai() ? C_ACC() : C_ACC(); }
+uint16_t C_SELACC() { return C_ACC(); }
 
 uint16_t heatV(float x) { return ramp(themeKurenai() ? K_HEAT : HEAT, 4, x); }
 uint16_t heat(int rssi) { return heatV((rssi + 100) / 60.0f); }
@@ -115,7 +116,7 @@ void utf8Upper(const char* s, char* out, size_t n) {
   if (!n) return;
   size_t i = 0;
   while (i < n - 1 && s[i]) i++;
-  while (i > 0 && ((uint8_t)s[i] & 0xC0) == 0x80 && i < strlen(s)) i--;   // don't cut a character in half
+  if (s[i]) { while (i > 0 && ((uint8_t)s[i] & 0xC0) == 0x80) i--; }   // don't cut a character in half
   memcpy(out, s, i); out[i] = 0;
   utf8UpperInPlace(out);
 }
@@ -202,15 +203,14 @@ int g_uiPages = 0, g_uiPage = 0;
 // screens (menu, settings, lists) change only a clock, digits or a few bars, so send
 // just those row bands. Rows are compared by hash (FNV over 32-bit words, ~1 ms per
 // frame); a full frame is sent every 2 s just in case.
-static uint32_t s_rowHash[400];
+static uint32_t s_rowHash[200];
 static uint32_t s_fullMs = 0;
-static bool     s_rowsValid = false;
 static void pushChanged() {
   const int W = spr.width(), H = spr.height();
   uint16_t* buf = (uint16_t*)spr.getPointer();
   uint32_t now = millis();
-  if (!buf || spr.getColorDepth() != 16 || H > 400 || (W & 1) || !s_rowsValid || now - s_fullMs > 2000) {
-    if (buf && spr.getColorDepth() == 16 && H <= 400 && !(W & 1)) {     // store hashes for the next frame
+  if (!buf || spr.getColorDepth() != 16 || H > 200 || (W & 1) || !s_rowsValid || now - s_fullMs > 15000) {
+    if (buf && spr.getColorDepth() == 16 && H <= 200 && !(W & 1)) {     // store hashes for the next frame
       for (int y = 0; y < H; y++) {
         const uint32_t* p = (const uint32_t*)(buf + y * W); uint32_t h = 2166136261u;
         for (int i = 0; i < W / 2; i++) h = (h ^ p[i]) * 16777619u;
@@ -223,7 +223,7 @@ static void pushChanged() {
     perfRows(H, H);
     return;
   }
-  static bool ch[400];
+  static bool ch[200];
   for (int y = 0; y < H; y++) {
     const uint32_t* p = (const uint32_t*)(buf + y * W); uint32_t h = 2166136261u;
     for (int i = 0; i < W / 2; i++) h = (h ^ p[i]) * 16777619u;

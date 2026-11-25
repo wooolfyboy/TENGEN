@@ -317,7 +317,8 @@ void drawActivity(uint32_t now) {
 void drawClients(uint32_t now) {
   int W = spr.width();
   char buf[48];
-  std::map<uint64_t, int> per;
+  static std::map<uint64_t, int> per;
+  per.clear();
   for (auto& kv : g_stas) per[kv.second.bssid]++;
   static std::vector<std::pair<int, uint64_t>> v;
   v.clear();

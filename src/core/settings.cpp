@@ -109,7 +109,13 @@ static int pageItems(int page, int* out) {
 // ---------- settings ----------
 bool g_screenOff = false;
 void applyBrightness() {
+  static bool s_wasOff = false;
   strip.setBrightness(g_ledBright * 255 / 100);
+  if (g_screenOff != s_wasOff) {
+    s_wasOff = g_screenOff;
+    tft.writecommand(g_screenOff ? 0x28 : 0x29);   // ST7789 display off / on
+    if (!g_screenOff) themeChanged();              // force clean full redraw on wake
+  }
   analogWrite(TFT_BL, g_screenOff ? 0 : g_scrBright * 255 / 100);
 }
 
@@ -249,7 +255,10 @@ static void optLabel(int id, int i, char* out, size_t n) {
       { "room", "комната" }, { "very near", "вплотную" },
     };
     for (auto& m : MAP) if (!strcmp(out, m[0])) { snprintf(out, n, "%s", m[1]); return; }
-    if (id == S_DIM) { char* p = strstr(out, " min"); if (p) strcpy(p, " мин"); else if ((p = strstr(out, " s"))) strcpy(p, " с"); }
+    if (id == S_DIM) {
+      if (DIM_SECS[i] >= 60) snprintf(out, n, "%d мин", DIM_SECS[i] / 60);
+      else if (DIM_SECS[i] > 0) snprintf(out, n, "%d с", DIM_SECS[i]);
+    }
   } else if (id == S_AUSRC && !strcmp(out, "laptop")) snprintf(out, n, "computer");
 }
 static int getVal(int id) {                               // option index / number / 0-1
@@ -412,10 +421,10 @@ static const char* unitLabel(const char* u) {   // units for the screen
   return u;
 }
 static const char* onOff(int v) { return v ? L("on", "вкл") : L("off", "выкл"); }
-static void rangeText(char* val, int r) {
+static void rangeText(char* val, size_t n, int r) {
   char nm[24]; optLabel(S_RANGE, r, nm, sizeof nm);
-  if (r == 0) sprintf(val, "%s", nm);
-  else sprintf(val, L("%s %d dBm", "%s %d дБм"), nm, RANGES[r].dbm);
+  if (r == 0) snprintf(val, n, "%s", nm);
+  else snprintf(val, n, L("%s %d dBm", "%s %d дБм"), nm, RANGES[r].dbm);
 }
 
 void drawSettings() {
@@ -439,31 +448,31 @@ void drawSettings() {
     char val[48];
     bool alert = false;
     switch (id) {
-      case S_RANGE:   rangeText(val, g_range); break;
-      case S_WRANGE:  rangeText(val, g_wRange); break;
-      case S_LEDEV:   if (g_thresh == 0) sprintf(val, "%s", L("off", "выкл")); else sprintf(val, "+/- %d", g_thresh); break;
-      case S_LEDBR:   sprintf(val, "%d%%", g_ledBright); break;
-      case S_SCREEN:  sprintf(val, "%d%%", g_scrBright); break;
+      case S_RANGE:   rangeText(val, sizeof(val), g_range); break;
+      case S_WRANGE:  rangeText(val, sizeof(val), g_wRange); break;
+      case S_LEDEV:   if (g_thresh == 0) snprintf(val, sizeof(val), "%s", L("off", "выкл")); else snprintf(val, sizeof(val), "+/- %d", g_thresh); break;
+      case S_LEDBR:   snprintf(val, sizeof(val), "%d%%", g_ledBright); break;
+      case S_SCREEN:  snprintf(val, sizeof(val), "%d%%", g_scrBright); break;
       case S_DIM:     optLabel(id, g_dimIdx, val, sizeof val); break;
       case S_VOLUME:  optLabel(id, g_sndIdx, val, sizeof val); break;
-      case S_CLICKS:  strcpy(val, onOff(g_clickEn)); break;
-      case S_THEME:   strcpy(val, g_theme == THEME_KURENAI ? "kurenai" : "denko"); break;
+      case S_CLICKS:  strlcpy(val, onOff(g_clickEn), sizeof(val)); break;
+      case S_THEME:   strlcpy(val, g_theme == THEME_KURENAI ? "kurenai" : "denko", sizeof(val)); break;
       case S_LANG:    optLabel(id, g_lang, val, sizeof val); break;
-      case S_BLETICK: strcpy(val, onOff(g_bleTicks)); break;
-      case S_WTICK:   strcpy(val, onOff(g_wifiTicks)); break;
-      case S_BAND:    strcpy(val, BANDS[g_band].name); break;
-      case S_MIC:     strcpy(val, onOff(g_micEn)); break;
-      case S_AULED:   strcpy(val, onOff(g_auLeds)); break;
+      case S_BLETICK: strlcpy(val, onOff(g_bleTicks), sizeof(val)); break;
+      case S_WTICK:   strlcpy(val, onOff(g_wifiTicks), sizeof(val)); break;
+      case S_BAND:    strlcpy(val, BANDS[g_band].name, sizeof(val)); break;
+      case S_MIC:     strlcpy(val, onOff(g_micEn), sizeof(val)); break;
+      case S_AULED:   strlcpy(val, onOff(g_auLeds), sizeof(val)); break;
       case S_AUSRC:   optLabel(id, g_auSrc, val, sizeof val); break;
       case S_CITY:    snprintf(val, sizeof(val), "%s", LT(curCity().name)); break;
       case S_VERSION: snprintf(val, sizeof(val), "v%s", FW_VERSION); break;
       case S_ALNEAR: case S_ALNEWFOR: case S_ALWARM: case S_ALSENS: case S_ALWARN: case S_ALALARM:
         snprintf(val, sizeof(val), "%d%s%s", getVal(id), DEFS[id].unit[0] && strcmp(DEFS[id].unit, "%") ? " " : "", unitLabel(DEFS[id].unit)); break;
       case S_ALNEW: case S_ALTRK: optLabel(id, getVal(id), val, sizeof(val)); break;
-      case S_ALCBLE: case S_ALCRF: case S_ALCSND: case S_ALCPRB: case S_ALBLINK: case S_ALPLATE: strcpy(val, onOff(getVal(id))); break;
+      case S_ALCBLE: case S_ALCRF: case S_ALCSND: case S_ALCPRB: case S_ALBLINK: case S_ALPLATE: strlcpy(val, onOff(getVal(id)), sizeof(val)); break;
       default:
-        if (g_bat.ok) { sprintf(val, "%d%%  %.2f V", g_bat.soc, g_bat.mv / 1000.0f); alert = g_bat.soc <= 20; }
-        else          sprintf(val, "%s", L("n/a", "нет"));
+        if (g_bat.ok) { snprintf(val, sizeof(val), "%d%%  %.2f V", g_bat.soc, g_bat.mv / 1000.0f); alert = g_bat.soc <= 20; }
+        else          snprintf(val, sizeof(val), "%s", L("n/a", "нет"));
         break;
     }
     spr.setTextDatum(ML_DATUM);

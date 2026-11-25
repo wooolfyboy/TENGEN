@@ -24,20 +24,29 @@ static void ccBegin() { g_ccSpi->beginTransaction(g_ccSet); SET_BUS_READ_MODE; }
 static void ccEnd()   { digitalWrite(CC_CS, HIGH); g_ccSpi->endTransaction(); }
 
 uint8_t ccStrobe(uint8_t s) {
-  ccBegin(); ccSel();
+  ccBegin();
+  if (!ccSel()) { ccEnd(); return 0xFF; }
   uint8_t st = g_ccSpi->transfer(s);
   ccEnd();
   return st;
 }
 void ccWrite(uint8_t a, uint8_t v) {
-  ccBegin(); ccSel();
+  ccBegin();
+  if (!ccSel()) { ccEnd(); return; }
   g_ccSpi->transfer(a); g_ccSpi->transfer(v);
   ccEnd();
 }
-uint8_t ccReadStatus(uint8_t a) {            // status registers 0x30..0x3D
-  ccBegin(); ccSel();
+uint8_t ccReadStatus(uint8_t a) {            // status registers 0x30..0x3D (CC1101 errata SWRZ020E: read until two match)
+  ccBegin();
+  if (!ccSel()) { ccEnd(); return 0; }
   g_ccSpi->transfer(a | 0xC0);
   uint8_t v = g_ccSpi->transfer(0);
+  for (int k = 0; k < 3; k++) {
+    g_ccSpi->transfer(a | 0xC0);
+    uint8_t v2 = g_ccSpi->transfer(0);
+    if (v2 == v) break;
+    v = v2;
+  }
   ccEnd();
   return v;
 }

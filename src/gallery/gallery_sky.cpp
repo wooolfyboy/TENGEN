@@ -64,6 +64,20 @@ static bool domeXY(const DomeView& v, float alt, float az, int& x, int& y) {
   return true;
 }
 
+// Direct stereographic projection from RA/Dec -> screen (eliminates asinf, atan2f, tanf, and 2 sin/cos per star)
+static inline bool domeRaDec(const SkyFrame& sf, const DomeView& v, float cr, float sr, float raDeg, float decDeg, int& x, int& y, float minSinAlt = 0.0f) {
+  float H = (sf.lst - raDeg) * D2R, d = decDeg * D2R;
+  float sd = sinf(d), cd = cosf(d), sH = sinf(H), cH = cosf(H);
+  float sa = sf.sinLat * sd + sf.cosLat * cd * cH;
+  if (sa < minSinAlt) return false;
+  float east = -cd * sH;
+  float north = sd * sf.cosLat - cd * sf.sinLat * cH;
+  float k = v.R / (1.0f + sa);
+  x = v.cx - (int)(k * (east * cr - north * sr));
+  y = v.cy - (int)(k * (north * cr + east * sr));
+  return true;
+}
+
 void drawSky(uint32_t now) {
   const int W = spr.width();
   g_fastFrame = true;
@@ -80,11 +94,18 @@ void drawSky(uint32_t now) {
   bool day = sunA.alt > -6, night = sunA.alt < -12;
 
   DomeView v = { 86, 88, 58, s_skyRot };
+  const float cr = cosf(v.rot * D2R), sr = sinf(v.rot * D2R);
   s_lblN = 0;
   spr.fillCircle(v.cx, v.cy, v.R, day ? TC(8, 30, 44) : night ? TC(3, 10, 16) : TC(5, 20, 30));
+  static float s_c72[72], s_s72[72];
+  static bool s_lut72 = false;
+  if (!s_lut72) {
+    for (int k = 0; k < 72; k++) { float a = k * 5 * D2R; s_c72[k] = cosf(a); s_s72[k] = sinf(a); }
+    s_lut72 = true;
+  }
   for (int alt = 30; alt < 90; alt += 30) {                    // altitude circles at 30° and 60°
     int r = (int)(v.R * tanf((90 - alt) * D2R / 2));
-    for (int k = 0; k < 72; k++) { float a = k * 5 * D2R; spr.drawPixel(v.cx + (int)(r * cosf(a)), v.cy + (int)(r * sinf(a)), UI_LINE()); }
+    for (int k = 0; k < 72; k++) spr.drawPixel(v.cx + (int)(r * s_c72[k]), v.cy + (int)(r * s_s72[k]), UI_LINE());
   }
   spr.drawCircle(v.cx, v.cy, v.R, C_ACC());
 
@@ -93,23 +114,24 @@ void drawSky(uint32_t now) {
   for (int k = 0; k < N_CL; k++) {
     int px = 0, py = 0; bool have = false;
     for (int i = CL_START[k]; i < CL_START[k + 1]; i++) {
-      AltAz a = toAltAzF(sf, CL_PTS[i][0] / 100.0f, (int16_t)CL_PTS[i][1] / 100.0f);
       int x, y;
-      if (domeXY(v, a.alt, a.az, x, y)) { if (have) spr.drawLine(px, py, x, y, clCol); px = x; py = y; have = true; }
-      else have = false;
+      if (domeRaDec(sf, v, cr, sr, CL_PTS[i][0] * 0.01f, (int16_t)CL_PTS[i][1] * 0.01f, x, y)) {
+        if (have) spr.drawLine(px, py, x, y, clCol);
+        px = x; py = y; have = true;
+      } else have = false;
     }
   }
   // stars: by day only the brightest show (and dimly)
   float magLimit = day ? 1.5f : night ? 5.0f : 3.0f;
+  const uint16_t cHot = C_HOT(), cM1 = heatV(0.9f), cM2 = heatV(0.75f);
   for (int i = 0; i < N_STARS; i++) {
-    float mag = STARS[i].mag / 10.0f - 2;
+    float mag = STARS[i].mag * 0.1f - 2.0f;
     if (mag > magLimit) break;                                   // sorted by brightness
-    AltAz a = toAltAzF(sf, STARS[i].ra / 100.0f, STARS[i].dec / 100.0f);
     int x, y;
-    if (!domeXY(v, a.alt, a.az, x, y)) continue;
-    if (mag < 0.5f)      spr.fillCircle(x, y, 2, C_HOT());
-    else if (mag < 1.5f) { spr.fillRect(x - 1, y - 1, 3, 3, heatV(0.9f)); spr.drawPixel(x, y, C_HOT()); }
-    else if (mag < 2.5f) spr.fillRect(x, y, 2, 2, heatV(0.75f));
+    if (!domeRaDec(sf, v, cr, sr, STARS[i].ra * 0.01f, STARS[i].dec * 0.01f, x, y)) continue;
+    if (mag < 0.5f)      spr.fillCircle(x, y, 2, cHot);
+    else if (mag < 1.5f) { spr.fillRect(x - 1, y - 1, 3, 3, cM1); spr.drawPixel(x, y, cHot); }
+    else if (mag < 2.5f) spr.fillRect(x, y, 2, 2, cM2);
     else                 spr.drawPixel(x, y, heatV(max(0.15f, 0.65f - (mag - 2.5f) * 0.2f)));
   }
   // planets
@@ -132,18 +154,18 @@ void drawSky(uint32_t now) {
   spr.setTextDatum(MC_DATUM);
   if (s_skyLabels == 0) {
     spr.setTextColor(scale565(C_ACC(), 70));
+    const float sin12 = sinf(12.0f * D2R);
     for (int i = 0; i < N_CON_NAMES; i++) {
-      AltAz a = toAltAzF(sf, CON_NAMES[i].ra / 100.0f, CON_NAMES[i].dec / 100.0f);
       int x, y;
-      if (a.alt > 12 && domeXY(v, a.alt, a.az, x, y)) label(CON_NAMES[i].ab, x, y);
+      if (domeRaDec(sf, v, cr, sr, CON_NAMES[i].ra * 0.01f, CON_NAMES[i].dec * 0.01f, x, y, sin12)) label(CON_NAMES[i].ab, x, y);
     }
   } else if (s_skyLabels == 1) {
     spr.setTextColor(UI_LABEL());
+    const float sin5 = sinf(5.0f * D2R);
     for (int i = 0; i < N_STAR_NAMES; i++) {
       const AStar& s = STARS[STAR_NAMES[i].star];
-      AltAz a = toAltAzF(sf, s.ra / 100.0f, s.dec / 100.0f);
       int x, y;
-      if (a.alt > 5 && domeXY(v, a.alt, a.az, x, y)) label(STAR_NAMES[i].name, x, y - 7);
+      if (domeRaDec(sf, v, cr, sr, s.ra * 0.01f, s.dec * 0.01f, x, y, sin5)) label(STAR_NAMES[i].name, x, y - 7);
     }
   }
   // Moon with phase, and Sun
@@ -250,16 +272,31 @@ void drawGlobe(uint32_t now) {
   float sx = cosf(sLat * D2R) * cosf(sLon * D2R), sy = cosf(sLat * D2R) * sinf(sLon * D2R), sz = sinf(sLat * D2R);
   float cl0 = cosf(g.lon0 * D2R), sl0 = sinf(g.lon0 * D2R);
   const uint16_t dayC = TC(10, 38, 54), nightC = TC(3, 11, 17), twiC = TC(6, 22, 32);
-  for (int yy = -g.R; yy <= g.R; yy++) {
-    int half = (int)sqrtf((float)(g.R * g.R - yy * yy));
-    for (int xx = -half; xx <= half; xx++) {
-      // point on the sphere in the "camera" frame -> Earth coordinates
-      float X = xx / (float)g.R, Y = -yy / (float)g.R, Z = sqrtf(max(0.0f, 1 - X * X - Y * Y));
-      float ex = -X * sl0 + (-Y * g.sl + Z * g.cl) * cl0;
-      float ey =  X * cl0 + (-Y * g.sl + Z * g.cl) * sl0;
-      float ez =  Y * g.cl + Z * g.sl;
-      float d = ex * sx + ey * sy + ez * sz;
-      spr.drawPixel(g.cx + xx, g.cy + yy, timeOk ? (d > 0.05f ? dayC : d > -0.05f ? twiC : nightC) : twiC);
+  if (!timeOk) {
+    spr.fillCircle(g.cx, g.cy, g.R, twiC);
+  } else {
+    // Rotate Sun vector into camera space once: d*R = xx*csx - yy*csy + sqrt(R² - xx² - yy²)*csz
+    float csx = -sx * sl0 + sy * cl0;
+    float csy = (-sx * cl0 - sy * sl0) * g.sl + sz * g.cl;
+    float csz = ( sx * cl0 + sy * sl0) * g.cl + sz * g.sl;
+    float thr = 0.05f * g.R;
+    int R2 = g.R * g.R;
+    for (int yy = -g.R; yy <= g.R; yy++) {
+      int r2y = R2 - yy * yy;
+      int half = (int)sqrtf((float)r2y);
+      float base = -yy * csy;
+      int runStart = -half;
+      uint16_t runCol = 0;
+      for (int xx = -half; xx <= half; xx++) {
+        float dr = base + xx * csx + sqrtf((float)(r2y - xx * xx)) * csz;
+        uint16_t c0 = dr > thr ? dayC : dr > -thr ? twiC : nightC;
+        if (xx == -half) runCol = c0;
+        else if (c0 != runCol) {
+          spr.drawFastHLine(g.cx + runStart, g.cy + yy, xx - runStart, runCol);
+          runStart = xx; runCol = c0;
+        }
+      }
+      spr.drawFastHLine(g.cx + runStart, g.cy + yy, half - runStart + 1, runCol);
     }
   }
   spr.drawCircle(g.cx, g.cy, g.R, C_ACC());

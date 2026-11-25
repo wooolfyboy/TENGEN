@@ -9,10 +9,15 @@ static char s_lastStep[48] = "";
 static const char* s_reason = "?";
 static bool s_crash = false;
 
+static const char* s_lastPtr = nullptr;
+
 void crumb(const char* s) {
+  if (s == s_lastPtr) return;
+  s_lastPtr = s;
   s_magic = 0x7E6A0001;
-  strncpy(s_crumb, s, sizeof(s_crumb) - 1);
-  s_crumb[sizeof(s_crumb) - 1] = 0;
+  size_t i = 0;
+  while (i < sizeof(s_crumb) - 1 && s[i]) { s_crumb[i] = s[i]; i++; }
+  s_crumb[i] = 0;
 }
 
 void crumbBoot() {

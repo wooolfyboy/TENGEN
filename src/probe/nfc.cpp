@@ -43,7 +43,7 @@ static bool pnReady() {
 
 static bool pnWait(uint32_t tmo) {
   uint32_t t0 = millis();
-  while (millis() - t0 < tmo) { if (pnReady()) return true; delay(1); }
+  while (millis() - t0 < tmo) { if (pnReady()) return true; crumbFeed(); delay(1); }
   return false;
 }
 
@@ -63,14 +63,21 @@ static int pnRead(uint8_t cmd, const uint8_t*& data) {
   for (int i = 0; i < got; i++) s_rx[i] = Wire.read();
   if (!(s_rx[0] & 1)) return -1;
   int i = 1;
-  while (i < 4 && s_rx[i] == 0x00 && s_rx[i + 1] == 0x00) i++;          // preamble
+  while (i < 4 && i + 1 < got && s_rx[i] == 0x00 && s_rx[i + 1] == 0x00) i++;   // preamble
+  if (i + 6 > got) return -1;
   if (s_rx[i] != 0x00 || s_rx[i + 1] != 0xFF) return -1;
   uint8_t L = s_rx[i + 2];
   if ((uint8_t)(L + s_rx[i + 3]) != 0 || L < 2) return -1;
   if (s_rx[i + 4] != 0xD5 || s_rx[i + 5] != (uint8_t)(cmd + 1)) return -1;
   int len = L - 2, avail = got - (i + 6) - 2;                          // minus DCS and postamble
   s_trunc = len > avail;
-  if (s_trunc) len = max(0, got - (i + 6));
+  if (!s_trunc) {
+    uint8_t dcs = 0;
+    for (int k = 0; k <= L; k++) dcs += s_rx[i + 4 + k];               // TFI + data + DCS == 0
+    if (dcs != 0) return -1;
+  } else {
+    len = max(0, got - (i + 6));
+  }
   data = s_rx + i + 6;
   return len;
 }
@@ -99,7 +106,11 @@ bool nfcStart() {
   }
   m.fw = (uint32_t)d[0] << 16 | d[1] << 8 | d[2];
   static const uint8_t SAM[] = { 0x14, 0x01, 0x14, 0x00 };             // normal mode
-  pnCmd(SAM, sizeof(SAM), d);
+  if (pnCmd(SAM, sizeof(SAM), d) < 0) {
+    m.state = NFC_NOREADER; m.gen++;
+    digitalWrite(PN_RST, LOW);
+    return false;
+  }
   static const uint8_t RETRY[] = { 0x32, 0x05, 0xFF, 0x01, 0x02 };     // short card search (2 tries) so we don't hang
   pnCmd(RETRY, sizeof(RETRY), d);
   m.state = NFC_SCAN; m.present = false;
@@ -137,11 +148,11 @@ static void inspectA(NfcCard& c) {
     static uint8_t mem[160];
     int got = 0;
     uint8_t rd[4] = { 0x40, 0x01, 0x30, 3 };
-    n = pnCmd(rd, 4, d);
+    n = pnCmd(rd, 4, d, 60);
     if (n >= 17 && d[0] == 0x00 && d[1] == 0xE1) {                       // CC: tag is formatted for NDEF
       for (int pg = 4; got + 16 <= (int)sizeof(mem); pg += 4) {
         rd[3] = pg;
-        n = pnCmd(rd, 4, d);
+        n = pnCmd(rd, 4, d, 60);
         if (n < 17 || d[0] != 0x00) break;
         memcpy(mem + got, d + 1, 16); got += 16;
         bool end = false;
@@ -151,7 +162,7 @@ static void inspectA(NfcCard& c) {
       if (got) nfcParseNdef(mem, got, c);
     }
     static const uint8_t VER[] = { 0x42, 0x60 };                         // GET_VERSION: NTAG213/215/216?
-    n = pnCmd(VER, sizeof(VER), d);
+    n = pnCmd(VER, sizeof(VER), d, 60);
     nfcClassify(c, (n >= 9 && d[0] == 0x00 && d[1] == 0x00 && d[2] == 0x04) ? d[7] : -1);
     return;
   }

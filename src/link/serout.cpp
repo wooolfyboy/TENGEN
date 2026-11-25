@@ -15,6 +15,8 @@ static bool   s_open = false;             // a line is being built (begin..end)
 
 static bool ensure() { if (!s_buf) s_buf = psAlloc<char>(CAP); return s_buf != nullptr; }
 static void put(const char* s, size_t n) {
+  if (n > CAP - s_len) n = CAP - s_len;      // never overflow the ring buffer
+  if (!n) return;
   size_t tail = (s_head + s_len) % CAP;
   size_t a = n < CAP - tail ? n : CAP - tail;
   memcpy(s_buf + tail, s, a);

@@ -75,8 +75,9 @@ static void parseMsg(const uint8_t* p, int n, NfcCard& c) {
     if (il) { if (i >= n) return; idl = p[i++]; }
     if (i + tl + idl > n) return;
     const uint8_t* type = p + i; i += tl + idl;
-    int avail = min((int)pl, n - i);
-    if (avail < 0) return;
+    if (i > n) return;
+    int rem = n - i;
+    int avail = pl > (uint32_t)rem ? rem : (int)pl;
     const uint8_t* pay = p + i;
     if (tnf == 1 && tl == 1 && type[0] == 'U' && avail >= 1) {
       uint8_t pc = pay[0];
@@ -91,7 +92,8 @@ static void parseMsg(const uint8_t* p, int n, NfcCard& c) {
     } else if (tnf == 4) {
       addRec(c, L("app: ", "приложение: "), type, tl);                          // android.com:pkg etc.
     }
-    i += pl;
+    if (pl > (uint32_t)rem) break;
+    i += (int)pl;
     if (h & 0x40) break;                                     // ME = last record
   }
 }
@@ -105,9 +107,11 @@ void nfcParseNdef(const uint8_t* m, int n, NfcCard& c) {
     if (t == 0xFE) return;                                   // end
     if (i >= n) return;
     uint32_t len = m[i++];
-    if (len == 0xFF) { if (i + 2 > n) return; len = m[i] << 8 | m[i + 1]; i += 2; }
-    if (t == 0x03) { parseMsg(m + i, min((int)len, n - i), c); return; }
-    i += len;
+    if (len == 0xFF) { if (i + 2 > n) return; len = (uint32_t)m[i] << 8 | m[i + 1]; i += 2; }
+    int rem = n - i;
+    if (t == 0x03) { parseMsg(m + i, len > (uint32_t)rem ? rem : (int)len, c); return; }
+    if (len > (uint32_t)rem) return;
+    i += (int)len;
   }
 }
 

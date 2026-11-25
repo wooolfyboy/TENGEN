@@ -89,7 +89,12 @@ static void fft(float* re, float* im, int n) {
 static void micTask(void*) {
   static int16_t buf[N];
   static float re[N], im[N], win[N];
-  for (int i = 0; i < N; i++) win[i] = 0.5f - 0.5f * cosf(2 * PI * i / (N - 1));   // Hann window
+  static bool winReady = false;
+  if (!winReady) {
+    for (int i = 0; i < N; i++) win[i] = 0.5f - 0.5f * cosf(2 * PI * i / (N - 1));   // Hann window (computed once)
+    winReady = true;
+  }
+  const float normSq = (N * 8192.0f) * (N * 8192.0f);
   while (s_micRun) {
     size_t got = 0;
     i2s_channel_read(s_rx, buf, sizeof(buf), &got, 50);
@@ -99,7 +104,7 @@ static void micTask(void*) {
     int rawPeak = 0;
     for (int i = 0; i < N; i++) { mean += buf[i]; rawPeak = max(rawPeak, abs((int)buf[i])); }
     mean /= N;
-    double acc = 0;
+    float acc = 0;                                   // hardware single-precision FPU instead of software double
     for (int i = 0; i < N; i++) {
       float v = buf[i] - mean;
       acc += v * v;
@@ -110,15 +115,15 @@ static void micTask(void*) {
     MicBlock b;
     b.level = level;
     b.rawPeak = rawPeak;
-    int domBin = 2; float domMag = 0;
+    int domBin = 2; float domMag2 = 0;
     for (int k = 0; k < AU_BANDS; k++) {
-      float m = 0;
+      float m2 = 0;
       for (int bin = s_bandLo[k]; bin <= s_bandHi[k]; bin++) {
-        float mag = sqrtf(re[bin] * re[bin] + im[bin] * im[bin]);
-        if (mag > m) m = mag;
-        if (bin > 2 && mag > domMag) { domMag = mag; domBin = bin; }
+        float mag2 = re[bin] * re[bin] + im[bin] * im[bin];   // compare squared magnitude (eliminates 256 sqrtf calls)
+        if (mag2 > m2) m2 = mag2;
+        if (bin > 2 && mag2 > domMag2) { domMag2 = mag2; domBin = bin; }
       }
-      b.bandDb[k] = 20.0f * log10f(m / (N * 8192.0f) + 1e-7f);
+      b.bandDb[k] = 10.0f * log10f(m2 / normSq + 1e-14f);
     }
     b.domHz = domBin * (float)SR / N;
     for (int i = 0; i < AU_WAVE; i++) b.wave[i] = buf[i * N / AU_WAVE];
@@ -161,7 +166,7 @@ static bool micStart(int slot) {
   if (s_micDone) xSemaphoreTake(s_micDone, 0);   // clear any stale signal
   s_micRun = true;
   TaskHandle_t h = nullptr;
-  if (xTaskCreatePinnedToCore(micTask, "mic", 6144, nullptr, 2, &h, 1) != pdPASS) {
+  if (xTaskCreatePinnedToCore(micTask, "mic", 6144, nullptr, 2, &h, 0) != pdPASS) {
     s_micRun = false;
     i2s_channel_disable(s_rx); i2s_del_channel(s_rx); s_rx = nullptr;
     return false;
@@ -360,8 +365,10 @@ static void sndInfo(int i, SubItem& it) {
   const char* const names[A_NUM] = { L("Spectrum", "Спектр"), L("Terrain", "Рельеф"), L("Reactor", "Реактор"), L("Level", "Уровень"), L("Waveform", "Волна"), "XY" };
   const char* const descs[A_NUM] = { L("sound spectrum", "спектр звука"), L("3D sound mountains", "3D-горы из звука"), L("pulse animation", "пульсирующая анимация"), L("noise meter", "шумомер"), L("waveform", "форма волны"), L("oscilloscope XY", "осциллограф XY") };
   it.name = names[i]; it.desc = descs[i]; it.value[0] = 0;
-  if (!g_micEn) { strcpy(it.value, L("mic off", "мик. выкл")); return; }
-  if (!g_micOk) { strcpy(it.value, L("no mic", "нет мик.")); return; }
+  if (!g_auFromPc) {
+    if (!g_micEn) { strlcpy(it.value, L("mic off", "мик. выкл"), sizeof(it.value)); return; }
+    if (!g_micOk) { strlcpy(it.value, L("no mic", "нет мик."), sizeof(it.value)); return; }
+  }
   if (i == A_LEVEL) snprintf(it.value, sizeof(it.value), "%d dBfs", (int)g_au.level);
   if (i == A_BARS && g_au.energy > 0.15f) snprintf(it.value, sizeof(it.value), L("%d Hz", "%d Гц"), (int)g_au.domHz);
 }

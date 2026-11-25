@@ -155,9 +155,10 @@ static void drawMainMenuHud() {
       spr.fillRect(W - 40 + i * 7, 5, 5, 8, on ? (g_bat.soc <= 20 ? C_ALERT() : acc) : C(40, 40, 50));
     }
   }
-  for (int x = 8; x < W - 8; x++) {                     // line fading to the right
-    float k = 1.0f - (float)(x - 8) / (W - 16);
-    spr.drawPixel(x, 18, scale565(acc, (int)(k * 100)));
+  int span = W - 16;
+  for (int s = 0; s < 16; s++) {                        // line fading to the right
+    int x0 = 8 + s * span / 16, x1 = 8 + (s + 1) * span / 16;
+    spr.drawFastHLine(x0, 18, x1 - x0, scale565(acc, 100 - s * 100 / 15));
   }
 
   // 5 cards visible; with more sections the strip scrolls with the selection

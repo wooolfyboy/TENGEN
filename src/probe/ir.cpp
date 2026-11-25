@@ -61,12 +61,15 @@ void irTick(uint32_t now) {
       if (!dur[k]) continue;
       bool mark = lv[k] == 0;
       if (n == 0 && !mark) continue;                         // start only with a flash
-      if ((n % 2 == 0) != mark) { if (n) d[n - 1] += dur[k]; continue; }   // two equal levels in a row: merge
+      if ((n % 2 == 0) != mark) {
+        if (n) { uint32_t sum = (uint32_t)d[n - 1] + dur[k]; d[n - 1] = sum > 65535 ? 65535 : (uint16_t)sum; }
+        continue;                                            // two equal levels in a row: merge without uint16 wrap
+      }
       d[n++] = dur[k];
     }
   }
   if (n && n % 2 == 0 && d[n - 1] > 10000) n--;              // trailing silence is not a gap
-  if (n >= 3) irFeed(d, min(n, IR_RAW_MAX), now);
+  if (n >= 3) irFeed(d, n, now);                             // pass full length so >=70-bit AC remotes are recognized
   arm();
 }
 

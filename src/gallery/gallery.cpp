@@ -52,20 +52,22 @@ void drawTesseract(uint32_t now) {
   spr.fillSprite(C_BG());
   const float t = s_phase;
   const float a1 = t * 0.9f, a2 = t * 0.55f, a3 = t * 0.35f, a4 = t * 0.25f;
+  const float c1 = cosf(a1), s1 = sinf(a1), c2 = cosf(a2), s2 = sinf(a2);
+  const float c3 = cosf(a3), s3 = sinf(a3), c4 = cosf(a4), s4 = sinf(a4);
+  const float ctilt = cosf(0.5f), stilt = sinf(0.5f);
   const int cx = W / 2, cy = (UI_TOP + UI_BOTTOM) / 2 + 2;
 
   float px[16], py[16], pw[16];
   for (int i = 0; i < 16; i++) {
     float x = (i & 1) ? 1 : -1, y = (i & 2) ? 1 : -1, z = (i & 4) ? 1 : -1, w = (i & 8) ? 1 : -1;
-    float c, s, tx;
-    c = cosf(a1); s = sinf(a1); tx = x * c - w * s; w = x * s + w * c; x = tx;   // XW
-    c = cosf(a2); s = sinf(a2); tx = y * c - w * s; w = y * s + w * c; y = tx;   // YW
-    c = cosf(a3); s = sinf(a3); tx = z * c - w * s; w = z * s + w * c; z = tx;   // ZW
-    c = cosf(a4); s = sinf(a4); tx = x * c - y * s; y = x * s + y * c; x = tx;   // XY
+    float tx;
+    tx = x * c1 - w * s1; w = x * s1 + w * c1; x = tx;   // XW
+    tx = y * c2 - w * s2; w = y * s2 + w * c2; y = tx;   // YW
+    tx = z * c3 - w * s3; w = z * s3 + w * c3; z = tx;   // ZW
+    tx = x * c4 - y * s4; y = x * s4 + y * c4; x = tx;   // XY
     float k4 = 2.6f / (3.2f - w);                         // 4D → 3D (perspective by w)
     x *= k4; y *= k4; z *= k4;
-    c = cosf(0.5f); s = sinf(0.5f);                       // slight camera tilt
-    tx = y * c - z * s; z = y * s + z * c; y = tx;
+    tx = y * ctilt - z * stilt; z = y * stilt + z * ctilt; y = tx;
     float k3 = 175.0f / (5.2f - z);                       // 3D → screen
     px[i] = cx + x * k3; py[i] = cy + y * k3; pw[i] = w;
   }
@@ -124,12 +126,19 @@ void drawTorus(uint32_t now) {
   const int cx = W / 2, cy = (UI_TOP + UI_BOTTOM) / 2 + 2;
   // light from above-front
   const float lx = 0, ly = 0.7071f, lz = -0.7071f;
+  static float s_ct[TO_V], s_st[TO_V], s_cu[TO_U], s_su[TO_U], s_ci[TO_V], s_si[TO_V];
+  static bool s_toLut = false;
+  if (!s_toLut) {
+    for (int i = 0; i < TO_V; i++) { float th = i * 2 * PI / TO_V; s_ct[i] = cosf(th); s_st[i] = sinf(th); s_ci[i] = cosf(i * 0.09f); s_si[i] = sinf(i * 0.09f); }
+    for (int j = 0; j < TO_U; j++) { float ph = j * 2 * PI / TO_U; s_cu[j] = cosf(ph); s_su[j] = sinf(ph); }
+    s_toLut = true;
+  }
   int n = 0;
   for (int i = 0; i < TO_V; i++) {
-    float th = i * 2 * PI / TO_V, ct = cosf(th), st = sinf(th);
+    float ct = s_ct[i], st = s_st[i], ci = s_ci[i], si = s_si[i];
+    float ox = R2 + R1 * ct, oy = R1 * st;                   // cross-section circle
     for (int j = 0; j < TO_U; j++) {
-      float ph = j * 2 * PI / TO_U + i * 0.09f, cp = cosf(ph), sp = sinf(ph);
-      float ox = R2 + R1 * ct, oy = R1 * st;                 // cross-section circle
+      float cp = s_cu[j] * ci - s_su[j] * si, sp = s_su[j] * ci + s_cu[j] * si;
       // rotate about Y (ph), then X (A), then Z (B)
       float x = ox * (cB * cp + sA * sB * sp) - oy * cA * sB;
       float y = ox * (sB * cp - sA * cB * sp) + oy * cA * cB;
@@ -217,7 +226,7 @@ static void lfStep() {
       if (nv) { pop++; hash = (hash ^ (y * LF_W + x)) * 16777619u; }
     }
   }
-  memcpy(s_lf, s_lfN, LF_BYTES);
+  std::swap(s_lf, s_lfN);
   s_lfGen++;
   // stall: pattern repeats (blinkers, period up to 8) or population barely changes
   bool repeat = false;

@@ -41,6 +41,15 @@ static bool parseTle(const char* name, const char* l1, const char* l2, Sat& s) {
   s.a = pow(MU / (nSec * nSec), 1.0 / 3.0);
   strncpy(s.name, name, sizeof(s.name) - 1); s.name[sizeof(s.name) - 1] = 0;
   s.ok = revDay > 0.5 && s.ecc < 0.9;
+  if (s.ok) {
+    s.cosi = cos(s.inc); s.sini = sin(s.inc);
+    double p = s.a * (1.0 - s.ecc * s.ecc);
+    double k = 1.5 * J2 * (RE / p) * (RE / p) * s.n0;
+    s.raanRate = -k * s.cosi;
+    s.argpRate =  k * (2.0 - 2.5 * s.sini * s.sini);
+    s.sq1pe = sqrt(1.0 + s.ecc);
+    s.sq1me = sqrt(1.0 - s.ecc);
+  }
   return s.ok;
 }
 
@@ -87,67 +96,115 @@ void satFromLine(char* line) {
 float satAgeDays(const Sat& s, double t) { return (float)((t - s.epochUnix) / 86400.0); }
 
 // ---------- position ----------
-bool satPos(const Sat& s, double t, SatPos& out) {
+// Fast ECEF-only propagation (skips asin/atan2/speed when scanning for passes)
+static bool satEcef(const Sat& s, double t, double& xe, double& ye, double& ze, double* rOut = nullptr) {
   if (!s.ok) return false;
-  double tm = (t - s.epochUnix) / 60.0;                      // minutes since epoch
-  double cosi = cos(s.inc), sini = sin(s.inc);
-  double p = s.a * (1 - s.ecc * s.ecc);
-  double k = 1.5 * J2 * (RE / p) * (RE / p) * s.n0;
-  double raan = s.raan0 - k * cosi * tm;
-  double argp = s.argp0 + k * (2 - 2.5 * sini * sini) * tm;
+  double tm = (t - s.epochUnix) * (1.0 / 60.0);              // minutes since epoch
+  double raan = s.raan0 + s.raanRate * tm;
+  double argp = s.argp0 + s.argpRate * tm;
   double M = fmod(s.m0 + s.n0 * tm + s.ndot2 * tm * tm, TWO_PI_);
+  if (M < 0) M += TWO_PI_;
   double E = M;
-  for (int i = 0; i < 10; i++) E -= (E - s.ecc * sin(E) - M) / (1 - s.ecc * cos(E));
-  double nu = 2 * atan2(sqrt(1 + s.ecc) * sin(E / 2), sqrt(1 - s.ecc) * cos(E / 2));
-  double r = s.a * (1 - s.ecc * cos(E));
+  for (int i = 0; i < 6; i++) {
+    double dE = (E - s.ecc * sin(E) - M) / (1.0 - s.ecc * cos(E));
+    E -= dE;
+    if (fabs(dE) < 1e-7) break;
+  }
+  double nu = 2.0 * atan2(s.sq1pe * sin(E * 0.5), s.sq1me * cos(E * 0.5));
+  double r = s.a * (1.0 - s.ecc * cos(E));
+  if (rOut) *rOut = r;
   double u = argp + nu;
-  // inertial frame (ECI)
   double cu = cos(u), su = sin(u), cO = cos(raan), sO = sin(raan);
-  double x = r * (cO * cu - sO * su * cosi);
-  double y = r * (sO * cu + cO * su * cosi);
-  double z = r * (su * sini);
-  // Earth rotation: ECI -> ECEF
+  double x = r * (cO * cu - sO * su * s.cosi);
+  double y = r * (sO * cu + cO * su * s.cosi);
+  ze = r * (su * s.sini);
   double g = gmstDeg(julianDate(t)) * D2R;
-  double xe = x * cos(g) + y * sin(g), ye = -x * sin(g) + y * cos(g);
-  out.x = xe; out.y = ye; out.z = z;
-  double rr = sqrt(xe * xe + ye * ye + z * z);
-  out.lat = (float)(asin(z / rr) / D2R);
-  out.lon = (float)(atan2(ye, xe) / D2R);
-  out.altKm = (float)(rr - RE);
-  out.speedKms = (float)sqrt(MU * (2 / r - 1 / s.a));
+  double cg = cos(g), sg = sin(g);
+  xe = x * cg + y * sg;
+  ye = -x * sg + y * cg;
   return true;
 }
 
-void satLook(const SatPos& p, float lat, float lon, float& el, float& az) {
+bool satPos(const Sat& s, double t, SatPos& out) {
+  double xe, ye, ze, r;
+  if (!satEcef(s, t, xe, ye, ze, &r)) return false;
+  out.x = xe; out.y = ye; out.z = ze;
+  double rr = sqrt(xe * xe + ye * ye + ze * ze);
+  out.lat = (float)(asin(constrain(ze / rr, -1.0, 1.0)) / D2R);
+  out.lon = (float)(atan2(ye, xe) / D2R);
+  out.altKm = (float)(rr - RE);
+  out.speedKms = (float)sqrt(MU * (2.0 / r - 1.0 / s.a));
+  return true;
+}
+
+struct ObsBasis { double ox, oy, oz, ex, ey, nx, ny, nz, ux, uy, uz; };
+static ObsBasis makeObs(float lat, float lon) {
   double la = lat * D2R, lo = lon * D2R;
-  double ox = RE * cos(la) * cos(lo), oy = RE * cos(la) * sin(lo), oz = RE * sin(la);
-  double rx = p.x - ox, ry = p.y - oy, rz = p.z - oz;
-  // topocentric axes: east, north, up
-  double e = -sin(lo) * rx + cos(lo) * ry;
-  double n = -sin(la) * cos(lo) * rx - sin(la) * sin(lo) * ry + cos(la) * rz;
-  double u = cos(la) * cos(lo) * rx + cos(la) * sin(lo) * ry + sin(la) * rz;
+  double cla = cos(la), sla = sin(la), clo = cos(lo), slo = sin(lo);
+  return { RE * cla * clo, RE * cla * slo, RE * sla,
+           -slo, clo,
+           -sla * clo, -sla * slo, cla,
+            cla * clo,  cla * slo, sla };
+}
+static inline float obsEl(const ObsBasis& o, double px, double py, double pz, float* azOut = nullptr) {
+  double rx = px - o.ox, ry = py - o.oy, rz = pz - o.oz;
+  double u = o.ux * rx + o.uy * ry + o.uz * rz;
   double rng = sqrt(rx * rx + ry * ry + rz * rz);
-  el = (float)(asin(u / rng) / D2R);
-  az = (float)(fmod(atan2(e, n) / D2R + 360.0, 360.0));
+  float el = (float)(asin(constrain(u / rng, -1.0, 1.0)) / D2R);
+  if (azOut) {
+    double e = o.ex * rx + o.ey * ry;
+    double n = o.nx * rx + o.ny * ry + o.nz * rz;
+    *azOut = (float)fmod(atan2(e, n) / D2R + 360.0, 360.0);
+  }
+  return el;
+}
+
+void satLook(const SatPos& p, float lat, float lon, float& el, float& az) {
+  ObsBasis o = makeObs(lat, lon);
+  el = obsEl(o, p.x, p.y, p.z, &az);
 }
 
 Pass satNextPass(const Sat& s, double from, float lat, float lon, float minEl, float hours) {
   Pass ps = { false, 0, 0, 0, 0 };
-  SatPos p; float el, az;
-  double end = from + hours * 3600;
+  if (!s.ok) return ps;
+  ObsBasis ob = makeObs(lat, lon);
+  double end = from + hours * 3600.0;
   bool up = false;
-  for (double t = from; t < end; t += 30) {
-    if (!satPos(s, t, p)) return ps;
-    satLook(p, lat, lon, el, az);
+  // 60 s coarse scan (any pass >= 10 deg lasts several minutes), with 2 s refinement on rise/peak/set
+  for (double t = from; t < end; t += 60.0) {
+    double xe, ye, ze;
+    if (!satEcef(s, t, xe, ye, ze)) return ps;
+    float az = 0;
+    float el = obsEl(ob, xe, ye, ze, t == from ? &az : nullptr);
     if (el >= minEl) {
-      if (!up) {                                           // refine the rise time in 2 s steps
+      if (!up) {
         double tr = t;
-        for (double q = t - 30; q <= t; q += 2) { satPos(s, q, p); float e2, a2; satLook(p, lat, lon, e2, a2); if (e2 >= minEl) { tr = q; ps.azRise = a2; break; } }
-        if (t == from) { ps.azRise = az; tr = from; }
+        if (t == from) {
+          ps.azRise = az; tr = from;
+        } else {
+          for (double q = t - 60.0; q <= t; q += 2.0) {
+            satEcef(s, q, xe, ye, ze);
+            float a2 = 0, e2 = obsEl(ob, xe, ye, ze, &a2);
+            if (e2 >= minEl) { tr = q; ps.azRise = a2; break; }
+          }
+        }
         ps.rise = tr; up = true; ps.found = true;
       }
-      if (el > ps.maxEl) ps.maxEl = el;
-    } else if (up) { ps.set = t; return ps; }
+      // sample around t in 10 s steps so peak elevation is accurate
+      for (double q = max(from, t - 50.0); q <= min(end, t + 50.0); q += 10.0) {
+        satEcef(s, q, xe, ye, ze);
+        float eq = obsEl(ob, xe, ye, ze);
+        if (eq > ps.maxEl) ps.maxEl = eq;
+      }
+    } else if (up) {
+      double ts = t;
+      for (double q = t - 60.0; q <= t; q += 2.0) {
+        satEcef(s, q, xe, ye, ze);
+        if (obsEl(ob, xe, ye, ze) < minEl) { ts = q; break; }
+      }
+      ps.set = ts;
+      return ps;
+    }
   }
   if (up) ps.set = end;
   return ps;

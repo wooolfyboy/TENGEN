@@ -90,19 +90,24 @@ void loop() {
 
   powerIdleTick(now);
   confirmFirmware(now);
-  // dimmed mode: 4x fewer frames to spare CPU and bus
-  uint32_t frame = powerIdle() ? REDRAW_MS * 4 : (g_fastFrame ? 33 : REDRAW_MS);
+  // dimmed mode: 4x fewer frames to spare CPU and bus; screen off: skip rendering completely
+  uint32_t frame = (powerIdle() || g_screenOff) ? REDRAW_MS * 4 : (g_fastFrame ? 33 : REDRAW_MS);
   if (now - lastDraw >= frame) {
     lastDraw = now;
     crumb("ble update"); bleUpdate(now);                   // always needed: menu shows device count, LED strip shows events
     g_fastFrame = false;              // the screen asks again if needed
-    uint32_t tDraw = micros();
-    if (g_powerHold) drawPowerHold();
-    else             { crumb("draw"); navDraw(now); }
-    perfDraw(micros() - tDraw);
+    if (g_powerHold) {
+      uint32_t tDraw = micros();
+      drawPowerHold();
+      perfDraw(micros() - tDraw);
+    } else if (!g_screenOff) {
+      uint32_t tDraw = micros();
+      crumb("draw"); navDraw(now);
+      perfDraw(micros() - tDraw);
+    }
     crumb("autosave"); settingsAutosave(now);
   }
   perfLoop(micros() - tLoop);
   perfTick(now);
-  delay(5);
+  delay((powerIdle() || g_screenOff) && !g_powerHold ? 12 : 5);
 }

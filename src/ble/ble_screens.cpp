@@ -365,21 +365,23 @@ void drawDetail(const Dev& d, const Ent& e, bool inMap, uint32_t now) {
   upperCopy(buf, bu, sizeof(bu));
   spr.setTextColor(UI_DIM());
   txt(bu, x0, y, 1); y += 10;
+  int n = 0;
+  auto addN = [&](int w) { if (w > 0) n += min(w, (int)sizeof(buf) - 1 - n); };
   if (d.nU) {
-    int n = snprintf(buf, sizeof(buf), "SVC");
+    n = 0; buf[0] = 0; addN(snprintf(buf, sizeof(buf), "SVC"));
     for (uint8_t i = 0; i < d.nU && n < 46; i++) {
       const char* nm = uuidName(d.uuids[i]);
       if (!nm[0]) { const char* o = btUuidOwner(d.uuids[i]); if (o) nm = o; }
-      n += snprintf(buf + n, sizeof(buf) - n, nm[0] ? " %04X %s" : " %04X", d.uuids[i], nm);
+      addN(snprintf(buf + n, sizeof(buf) - (size_t)n, nm[0] ? " %04X %s" : " %04X", d.uuids[i], nm));
     }
     upperCopy(buf, bu, sizeof(bu));
     txt(bu, x0, y, 1); y += 10;
   }
   if (d.hasCid) {
-    int n = snprintf(buf, sizeof(buf), "MFR %02X %02X |", d.cid & 0xFF, d.cid >> 8);
+    n = 0; buf[0] = 0; addN(snprintf(buf, sizeof(buf), "MFR %02X %02X |", d.cid & 0xFF, d.cid >> 8));
     int shown = d.mfrLen < 6 ? d.mfrLen : 6;
-    for (int i = 0; i < shown; i++) n += snprintf(buf + n, sizeof(buf) - n, " %02X", d.mfr[i]);
-    snprintf(buf + n, sizeof(buf) - n, "%s  LEN %d", d.mfrLen > 6 ? " .." : "", d.mfrLen);
+    for (int i = 0; i < shown; i++) addN(snprintf(buf + n, sizeof(buf) - (size_t)n, " %02X", d.mfr[i]));
+    addN(snprintf(buf + n, sizeof(buf) - (size_t)n, "%s  LEN %d", d.mfrLen > 6 ? " .." : "", d.mfrLen));
     txt(buf, x0, y, 1);
   }
   present();

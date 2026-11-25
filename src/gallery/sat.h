@@ -18,6 +18,9 @@ struct Sat {
   double n0, ndot2;                      // rad/min, rad/min²
   double inc, raan0, ecc, argp0, m0;     // radians
   double a;                              // semi-major axis, km
+  double cosi = 1, sini = 0;             // precomputed from inc/ecc/a/n0 in parseTle()
+  double raanRate = 0, argpRate = 0;
+  double sq1pe = 1, sq1me = 1;
 };
 extern Sat g_sats[SAT_MAX];
 extern int g_nSats;

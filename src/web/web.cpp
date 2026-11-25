@@ -171,6 +171,7 @@ static void scanCollect() {
 
 // which tab is open on the phone: the page sends it in every request (?tab=)
 static void noteTab() {
+  if (!s_srv->hasArg("tab")) return;
   static const char* const T[][2] = { { "ov", "overview" }, { "ble", "bluetooth" }, { "wifi", "wi-fi" },
                                       { "sub", "sub-ghz" }, { "snd", "sound" }, { "sys", "system" },
                                       { "upd", "update" } };
@@ -238,9 +239,11 @@ static void otaUpload() {
     }
     if (n && !otaWrite(d, n)) return;
     static uint32_t lastDraw = 0;
-    if (millis() - lastDraw > 400) {               // device screen: progress (size unknown, assume ~2 MB)
+    if (millis() - lastDraw > 400) {               // device screen: progress
       lastDraw = millis();
-      s_otaPct = min(99, (int)(s_otaPos * 100 / 2100000));
+      long cl = s_srv->header("Content-Length").toInt();
+      size_t est = cl > 100000 ? (size_t)cl : 2100000;
+      s_otaPct = min(99, (int)((uint64_t)s_otaPos * 100 / est));
       otaDrawProgress();
     }
   } else if (up.status == UPLOAD_FILE_END) {
@@ -343,19 +346,28 @@ static void parseWant(SseCli& k, const String& req) {
 static void sseAccept() {
   NetworkClient nc = s_sseSrv->accept();
   if (!nc) return;
-  // the request arrives right after connect: read the first line and headers (up to 300 ms)
-  String req; uint32_t t0 = millis(); bool done = false;
-  nc.setTimeout(300);
-  while (millis() - t0 < 300 && nc.connected()) {
-    if (!nc.available()) { delay(1); continue; }
-    String line = nc.readStringUntil('\n');
-    if (!req.length()) req = line;
-    if (line == "\r" || line.length() == 0) { done = true; break; }
+  // Bounded header read (max 768 bytes, max 80 ms) so a slow or malicious client
+  // cannot stall loop() or exhaust the heap via readStringUntil().
+  char hdr[768];
+  size_t hn = 0;
+  uint32_t t0 = millis();
+  bool done = false;
+  while (millis() - t0 < 80 && nc.connected() && hn < sizeof(hdr) - 1) {
+    int av = nc.available();
+    if (av <= 0) { if (hn > 0 && millis() - t0 > 20) delayMicroseconds(250); else break; continue; }
+    int rd = nc.read((uint8_t*)(hdr + hn), min((size_t)av, sizeof(hdr) - 1 - hn));
+    if (rd <= 0) break;
+    hn += (size_t)rd;
+    hdr[hn] = 0;
+    if (strstr(hdr, "\r\n\r\n") || strstr(hdr, "\n\n")) { done = true; break; }
   }
-  if (!done || !req.startsWith("GET /stream")) {
+  char* eol = strpbrk(hdr, "\r\n");
+  if (eol) *eol = 0;
+  if (!done || strncmp(hdr, "GET /stream", 11) != 0) {
     nc.print("HTTP/1.1 404 Not Found\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\n\r\n");
     nc.stop(); return;
   }
+  String req(hdr); req += ' ';
   int slot = 0;
   for (int i = 0; i < SSE_NET; i++) if (!s_sse[i].on) { slot = i; break; }   // both busy: evict the first
   SseCli& k = s_sse[slot];
@@ -379,6 +391,8 @@ static int sseClients(bool& ble, bool& wifi, bool& snd, int& subM, int& subB, bo
 }
 
 static void sseTick(uint32_t now) {
+  static String o;                                 // reused scratch buffer: avoids ~30 heap allocs/sec
+  if (o.capacity() < 2048) o.reserve(2048);
   if (s_sseSrv) sseAccept();
   for (auto& k : s_sse) {
     if (!k.on) continue;
@@ -387,7 +401,7 @@ static void sseTick(uint32_t now) {
     if (k.pend.length()) sseFlush(k);
     if (!k.tSt || now - k.tSt >= 2000) {
       k.tSt = now;
-      String o; o.reserve(384); o = "{\"name\":\"" DEVICE_NAME "\",\"up\":"; o += millis() / 1000;
+      o = "{\"name\":\"" DEVICE_NAME "\",\"up\":"; o += millis() / 1000;
       o += ",\"bat\":"; o += g_bat.ok ? g_bat.soc : -1; o += ",\"mv\":"; o += g_bat.mv;
       o += ",\"usb\":"; o += g_bat.bus ? 1 : 0; o += ",\"chg\":"; o += g_bat.chg;
       o += ",\"cli\":"; o += WiFi.softAPgetStationNum(); o += ",\"heap\":"; o += ESP.getFreeHeap() / 1024;
@@ -406,18 +420,18 @@ static void sseTick(uint32_t now) {
       if (!k.satSent) {                          // once: city and orbits, the tablet computes sky and globe
         k.satSent = true;
         const City& c = curCity();
-        String a = "{\"city\":"; jsonStr(a, LT(c.name));
-        a += ",\"lat\":"; a += String(c.lat, 3); a += ",\"lon\":"; a += String(c.lon, 3);
-        a += ",\"sats\":"; satJson(a); a += '}';
-        sseEvent(k, "sat", a, false);
+        o = "{\"city\":"; jsonStr(o, LT(c.name));
+        o += ",\"lat\":"; o += String(c.lat, 3); o += ",\"lon\":"; o += String(c.lon, 3);
+        o += ",\"sats\":"; satJson(o); o += '}';
+        sseEvent(k, "sat", o, false);
       }
     }
-    if (k.ble && (!k.tBle || now - k.tBle >= 1000)) { k.tBle = now; String o; o.reserve(2048); bleStreamJson(o); sseEvent(k, "ble", o, false); }
+    if (k.ble && (!k.tBle || now - k.tBle >= 1000)) { k.tBle = now; o = ""; bleStreamJson(o); sseEvent(k, "ble", o, false); }
     if (k.wifi && k.wifiSeen != s_wifiGen) { k.wifiSeen = s_wifiGen; sseEvent(k, "wifi", s_wifiJson, false); }
-    if (k.snd && now - k.tSnd >= 40) { k.tSnd = now; String o; o.reserve(320); audioStreamJson(o); sseEvent(k, "snd", o, true); }
-    if (k.sub && s_subOn && now - k.tSub >= 140) { k.tSub = now; String o; o.reserve(1024); subJson(o); sseEvent(k, "sub", o, true); }
-    if (k.pc && now - k.tPc >= 1000) { k.tPc = now; String o; o.reserve(1024); pcStreamJson(o); sseEvent(k, "pc", o, false); }
-    if (k.wx && now - k.tWx >= 1000) { k.tWx = now; String o; o.reserve(512); wxJson(o); sseEvent(k, "wx", o, false); }
+    if (k.snd && now - k.tSnd >= 40) { k.tSnd = now; o = ""; audioStreamJson(o); sseEvent(k, "snd", o, true); }
+    if (k.sub && s_subOn && now - k.tSub >= 140) { k.tSub = now; o = ""; subJson(o); sseEvent(k, "sub", o, true); }
+    if (k.pc && now - k.tPc >= 1000) { k.tPc = now; o = ""; pcStreamJson(o); sseEvent(k, "pc", o, false); }
+    if (k.wx && now - k.tWx >= 1000) { k.tWx = now; o = ""; wxJson(o); sseEvent(k, "wx", o, false); }
     if (k.sens && now - k.tSens >= 150 && (k.sensSeen != g_sensGen || now - k.tSens >= 1000)) {
       k.tSens = now; k.sensSeen = g_sensGen; String o; o.reserve(1536); sensJson(o, now); sseEvent(k, "sens", o, false);
     }
@@ -501,8 +515,9 @@ static bool apiHandle(const char* path, const ApiArgs& A, String& o) {
   // tablet as a remote: device settings, device labels, actions
   if (is("/api/settings")) { settingsJson(o); return true; }
   if (is("/api/set")) {
-    { char c[48]; snprintf(c, sizeof c, "api set %s=%s", A.get("k").c_str(), A.get("v").c_str()); crumb(c); }
-    settingsSetKey(A.get("k").c_str(), A.get("v").c_str(), o); return true;
+    String k = A.get("k"), v = A.get("v");
+    { char c[48]; snprintf(c, sizeof c, "api set %s=%s", k.c_str(), v.c_str()); crumb(c); }
+    settingsSetKey(k.c_str(), v.c_str(), o); return true;
   }
   if (is("/api/label")) {
     bool stable = false;
@@ -567,14 +582,32 @@ static void webStart() {
   s_dns.setErrorReplyCode(DNSReplyCode::NoError);
   s_dns.start(53, "*", ip);                        // any address -> this device (the page opens by itself)
   s_srv = new WebServer(80);
+  static const char* const HDRS[] = { "If-None-Match", "Content-Length" };
+  s_srv->collectHeaders(HDRS, 2);
   // entry: "/" is the launcher (splash, LITE / FULL choice, same app as /full);
   // "/lite" is the light phone page; "/full" opens the full scene directly.
   // Old /phone and /tablet addresses are kept and lead to the same places.
-  static auto sendApp = [] {                       // tablet app: one gzip file
+  static auto sendApp = [] {                       // tablet app: one gzip file with ETag + chunked WDT-safe send
     s_reqs++;
-    s_srv->sendHeader("Content-Encoding", "gzip");
+    static const char* const ETAG = "\"" TABLET_HTML_SHA "\"";
+    s_srv->client().setNoDelay(true);
+    s_srv->sendHeader("ETag", ETAG);
     s_srv->sendHeader("Cache-Control", "no-cache");
-    s_srv->send_P(200, "text/html", (const char*)TABLET_GZ, TABLET_GZ_LEN);
+    if (s_srv->header("If-None-Match") == ETAG) {
+      s_srv->send(304, "text/plain", "");
+      return;
+    }
+    s_srv->sendHeader("Content-Encoding", "gzip");
+    s_srv->setContentLength(TABLET_GZ_LEN);
+    s_srv->send(200, "text/html", "");
+    const char* p = (const char*)TABLET_GZ;
+    size_t rem = TABLET_GZ_LEN;
+    while (rem > 0 && s_srv->client().connected()) {
+      size_t chunk = rem > 8192 ? 8192 : rem;
+      s_srv->sendContent_P(p, chunk);
+      p += chunk; rem -= chunk;
+      crumbFeed();
+    }
   };
   s_srv->on("/", [] { sendApp(); });
   s_srv->on("/full", [] { sendApp(); });
@@ -621,6 +654,8 @@ static void webStop() {
   if (s_sndOn) { audioWebStop(); s_sndOn = false; }
   if (s_irOn) { irStop(); s_irOn = false; }
   if (s_nfcOn) { nfcStop(); s_nfcOn = false; }
+  s_nNets = 0; s_netCount = 0; s_scanned = false;
+  s_wifiJson = "{\"scanned\":false,\"nets\":[]}";
   s_on = false;
   s_tab = "";
 }
@@ -748,7 +783,9 @@ void webLinkPump() {
     static unsigned char enc[2100]; size_t olen = 0;
     mbedtls_base64_encode(enc, sizeof enc, &olen, (const unsigned char*)TABLET_GZ + s_pgOff, n);
     char head[40]; int hl = snprintf(head, sizeof head, "@g %d %u ", (int)s_pgId, (unsigned)s_pgOff);
-    if (!serOutBegin(hl + olen, false)) break;
+    if (hl < 0) { s_pgId = -1; break; }
+    if (hl >= (int)sizeof(head)) hl = (int)sizeof(head) - 1;
+    if (!serOutBegin((size_t)hl + olen, false)) break;
     serOutPart(head, hl); serOutPart((const char*)enc, olen); serOutEnd();
     s_pgOff += n;
   }

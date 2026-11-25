@@ -48,7 +48,7 @@ static void spReset() {
 }
 
 static void spTick() {
-  for (int k = 0; k < 12; k++) {               // ~12 points per loop pass (~15 ms)
+  for (int k = 0; k < 6; k++) {                // 6 points per loop pass (~8 ms max stall)
     int r = ccMeasure(spFreq(g_spIdx));
     r = constrain(r, -120, -10);
     g_spRow[g_spIdx] = r;
@@ -56,8 +56,8 @@ static void spTick() {
     if (r > g_spPeak[g_spIdx]) g_spPeak[g_spIdx] = r;
     if (++g_spIdx >= SP_N) {
       g_spIdx = 0;
-      for (int i = 0; i < SP_N && g_wf; i++) {   // waterfall row
-        g_wf[g_wfHead][i] = (uint8_t)constrain(g_spRow[i] + 120, 0, 110);
+      for (int i = 0; i < SP_N; i++) {         // waterfall row + peak decay
+        if (g_wf) g_wf[g_wfHead][i] = (uint8_t)constrain(g_spRow[i] + 120, 0, 110);
         if (g_spPeak[i] > -110) g_spPeak[i]--; // peaks decay slowly
       }
       g_wfHead = (g_wfHead + 1) % WF_ROWS;

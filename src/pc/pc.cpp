@@ -20,6 +20,7 @@ uint32_t g_pcLastCmdMs = 0;
 
 static char   s_line[1024];
 static size_t s_len = 0;
+static bool   s_discard = false;
 
 static void parseList(const char* v, uint8_t* out, int& n) {
   n = 0;
@@ -92,25 +93,27 @@ static void parseLine(char* s) {
     if (!eq) continue;
     *eq = 0;
     const char* k = tok; const char* v = eq + 1;
-    float f = atof(v);
-    if      (!strcmp(k, "cpu"))  p.cpu = f;
-    else if (!strcmp(k, "freq")) p.freq = f;
-    else if (!strcmp(k, "c"))    parseList(v, p.core, p.nCores);
-    else if (!strcmp(k, "ram"))  p.ram = f;
-    else if (!strcmp(k, "ramu")) p.ramU = f;
-    else if (!strcmp(k, "ramt")) p.ramT = f;
-    else if (!strcmp(k, "dsk"))  p.disk = f;
-    else if (!strcmp(k, "dr"))   p.dR = f;
-    else if (!strcmp(k, "dw"))   p.dW = f;
-    else if (!strcmp(k, "nd"))   p.nD = f;
-    else if (!strcmp(k, "nu"))   p.nU = f;
-    else if (!strcmp(k, "bat"))  p.bat = (int)f;
-    else if (!strcmp(k, "plug")) p.plug = f > 0;
-    else if (!strcmp(k, "up"))   p.up = (uint32_t)f;
-    else if (!strcmp(k, "top"))  { strncpy(p.top, v, sizeof(p.top) - 1); p.top[sizeof(p.top) - 1] = 0; }
-    else if (!strcmp(k, "host")) { strncpy(p.host, v, sizeof(p.host) - 1); p.host[sizeof(p.host) - 1] = 0; }
+    if      (!strcmp(k, "c"))    parseList(v, p.core, p.nCores);
+    else if (!strcmp(k, "top"))  strlcpy(p.top, v, sizeof(p.top));
+    else if (!strcmp(k, "host")) strlcpy(p.host, v, sizeof(p.host));
     else if (!strcmp(k, "ts"))   ts = strtoul(v, nullptr, 10);
     else if (!strcmp(k, "tz"))   tz = atol(v);
+    else if (!strcmp(k, "bat"))  p.bat = atoi(v);
+    else if (!strcmp(k, "plug")) p.plug = atoi(v) > 0;
+    else if (!strcmp(k, "up"))   p.up = strtoul(v, nullptr, 10);
+    else {
+      float f = strtof(v, nullptr);
+      if      (!strcmp(k, "cpu"))  p.cpu = f;
+      else if (!strcmp(k, "freq")) p.freq = f;
+      else if (!strcmp(k, "ram"))  p.ram = f;
+      else if (!strcmp(k, "ramu")) p.ramU = f;
+      else if (!strcmp(k, "ramt")) p.ramT = f;
+      else if (!strcmp(k, "dsk"))  p.disk = f;
+      else if (!strcmp(k, "dr"))   p.dR = f;
+      else if (!strcmp(k, "dw"))   p.dW = f;
+      else if (!strcmp(k, "nd"))   p.nD = f;
+      else if (!strcmp(k, "nu"))   p.nU = f;
+    }
   }
   if (ts > 1700000000) astroSetTime(ts, (int32_t)tz);    // exact time, for sky and satellites
   p.have = true;
@@ -127,9 +130,12 @@ void pcPoll(uint32_t) {
   while (Serial.available() && budget--) {
     char c = (char)Serial.read();
     if (c == '\n' || c == '\r') {
+      if (s_discard) { s_discard = false; s_len = 0; continue; }
       if (s_len) { s_line[s_len] = 0; parseLine(s_line); s_len = 0; }
-    } else if (s_len < sizeof(s_line) - 1) s_line[s_len++] = c;
-    else s_len = 0;                                  // line too long - garbage
+    } else if (!s_discard) {
+      if (s_len < sizeof(s_line) - 1) s_line[s_len++] = c;
+      else { s_len = 0; s_discard = true; }          // line too long: discard until EOL
+    }
   }
 }
 

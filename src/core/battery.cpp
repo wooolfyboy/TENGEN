@@ -55,7 +55,8 @@ static void batRead() {
 
 void batBegin() {
   Wire.begin(BAT_I2C_SDA, BAT_I2C_SCL);
-  Wire.setClock(100000);
+  Wire.setClock(400000);
+  Wire.setTimeOut(50);
   batRead();
   g_bat.t = millis();
 }

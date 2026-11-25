@@ -222,15 +222,16 @@ void drawPcMedia(uint32_t now) {
     spr.fillCircle(cx, cy, R, TC(6, 18, 22));
     spr.drawCircle(cx, cy, R, UI_LINE());
     for (int r = 24; r < R - 2; r += 4) spr.drawCircle(cx, cy, r, TC(12, 34, 41));   // grooves
-    // highlights: two light sectors on the grooves, spinning with the record
-    for (int side = 0; side < 2; side++) {
-      float base = rot + side * PI;
-      for (int r = 26; r < R - 3; r += 4)
-        for (int k = -6; k <= 6; k++) {
-          float ang = base + k * 0.035f;
-          int br = 110 - abs(k) * 15;
-          spr.drawPixel(cx + (int)(cosf(ang) * r), cy + (int)(sinf(ang) * r), TC(br / 3, br, br + 20 > 255 ? 255 : br + 20));
-        }
+    // highlights: two symmetric light sectors on the grooves, spinning with the record
+    for (int k = -6; k <= 6; k++) {
+      float ang = rot + k * 0.035f, ca = cosf(ang), sa = sinf(ang);
+      int br = 110 - abs(k) * 15;
+      uint16_t hc = TC(br / 3, br, br + 20 > 255 ? 255 : br + 20);
+      for (int r = 26; r < R - 3; r += 4) {
+        int dx = (int)(ca * r), dy = (int)(sa * r);
+        spr.drawPixel(cx + dx, cy + dy, hc);
+        spr.drawPixel(cx - dx, cy - dy, hc);
+      }
     }
     // record label, spinning
     spr.fillCircle(cx, cy, 19, TC(10, 60, 74));

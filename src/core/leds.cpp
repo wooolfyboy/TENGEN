@@ -15,8 +15,12 @@ void ledsEvent(int dir) { g_ledEvent = dir; g_ledStart = millis(); }
 
 void ledsTick() {
   if (g_ledEvent == 0) return;
-  uint32_t t = millis() - g_ledStart;
+  uint32_t now = millis();
+  static uint32_t s_lastLedMs = 0;
+  uint32_t t = now - g_ledStart;
   if (t >= LED_DUR) { strip.clear(); strip.show(); g_ledEvent = 0; return; }
+  if (now - s_lastLedMs < 30) return;           // ~33 Hz instead of 200 Hz RMT blasts
+  s_lastLedMs = now;
   float p = (float)t / LED_DUR;                 // 0..1
   strip.clear();
   if (g_ledEvent > 0) {

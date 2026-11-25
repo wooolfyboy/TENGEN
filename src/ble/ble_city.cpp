@@ -44,28 +44,36 @@ void drawCity(const std::vector<Blip>& bl, uint32_t now) {
     sx = cx + xr * F / d; sy = cyS - vy * F / d;
   };
 
-  // plate: rings, rays and the scan wave
+  // plate: rings, rays and the scan wave (LUT avoids ~190 sin/cos calls per frame)
+  static float s_c48[49], s_s48[49], s_c40[41], s_s40[41];
+  static bool s_cityLut = false;
+  if (!s_cityLut) {
+    for (int i = 0; i <= 48; i++) { float a = i * 2 * PI / 48; s_c48[i] = cosf(a); s_s48[i] = sinf(a); }
+    for (int i = 0; i <= 40; i++) { float a = i * 2 * PI / 40; s_c40[i] = cosf(a); s_s40[i] = sinf(a); }
+    s_cityLut = true;
+  }
   const uint16_t ring = UI_LINE();
   for (int k = 1; k <= 3; k++) {
     float r = k / 3.0f, px = 0, py = 0, d;
     for (int i = 0; i <= 48; i++) {
-      float a = i * 2 * PI / 48, sx, sy;
-      proj(cosf(a) * r, 0, sinf(a) * r, sx, sy, d);
+      float sx, sy;
+      proj(s_c48[i] * r, 0, s_s48[i] * r, sx, sy, d);
       if (i) spr.drawLine(px, py, sx, sy, k == 3 ? C_ACC() : ring);
       px = sx; py = sy;
     }
   }
+  float cx0, cy0, cd0; proj(0, 0, 0, cx0, cy0, cd0);
   for (int i = 0; i < 8; i++) {
-    float a = i * PI / 4, x0, y0, x1, y1, d;
-    proj(0, 0, 0, x0, y0, d); proj(cosf(a), 0, sinf(a), x1, y1, d);
-    spr.drawLine(x0, y0, x1, y1, ring);
+    float x1, y1, d;
+    proj(s_c48[i * 6], 0, s_s48[i * 6], x1, y1, d);
+    spr.drawLine(cx0, cy0, x1, y1, ring);
   }
   {
     float wr = (now % 2200) / 2200.0f, px = 0, py = 0, d;     // wave from the centre
     uint16_t wc = scale565(C_ACC(), (int)(70 * (1 - wr)) + 10);
     for (int i = 0; i <= 40; i++) {
-      float a = i * 2 * PI / 40, sx, sy;
-      proj(cosf(a) * wr, 0, sinf(a) * wr, sx, sy, d);
+      float sx, sy;
+      proj(s_c40[i] * wr, 0, s_s40[i] * wr, sx, sy, d);
       if (i) spr.drawLine(px, py, sx, sy, wc);
       px = sx; py = sy;
     }
@@ -77,7 +85,8 @@ void drawCity(const std::vector<Blip>& bl, uint32_t now) {
   static uint32_t lastPick = 0;
   if (now - lastPick >= 1500 || s_city.empty()) {
     lastPick = now;
-    std::vector<int> idx(bl.size());
+    static std::vector<int> idx;
+    idx.resize(bl.size());
     for (size_t i = 0; i < bl.size(); i++) idx[i] = (int)i;
     std::sort(idx.begin(), idx.end(), [&](int a, int b) { return bl[a].rssi > bl[b].rssi; });
     if (idx.size() > 48) idx.resize(48);
