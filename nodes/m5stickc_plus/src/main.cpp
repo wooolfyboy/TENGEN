@@ -160,7 +160,10 @@ class EarScanCB : public NimBLEScanCallbacks {
       if (memcmp(s_devs[i].mac, mac, 6) == 0) { idx = i; break; }
     }
     if (idx >= 0) {
-      s_devs[idx].rssiS = s_devs[idx].rssiS * 0.7f + (float)rssi * 0.3f;
+      // Symmetric anti-multipath filter matching T-Embed's ScanCB
+      float m = (float)rssi;
+      float a = (m >= s_devs[idx].rssiS) ? 0.38f : (m < s_devs[idx].rssiS - 7.0f ? 0.08f : 0.22f);
+      s_devs[idx].rssiS += (m - s_devs[idx].rssiS) * a;
       if (type) s_devs[idx].type = type;
       s_devs[idx].seenMs = now;
     } else if (s_nDevs < MAX_SEEN) {

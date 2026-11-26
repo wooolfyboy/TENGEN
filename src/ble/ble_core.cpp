@@ -113,6 +113,12 @@ class ScanCB : public NimBLEScanCallbacks {
       Dev& v = it->second;
       v.t = now; v.rssi = rssi; v.pkts++;
       v.rssiS = (int8_t)((v.rssiS * 3 + rssi) / 4);
+      // Anti-multipath sub-dB float tracker: fast on clean peaks, gentle on single-channel reflection dips
+      {
+        float m = (float)rssi;
+        float a = (m >= v.rssiF) ? 0.38f : (m < v.rssiF - 7.0f ? 0.08f : 0.22f);
+        v.rssiF += (m - v.rssiF) * a;
+      }
       if (rssi < v.rmin) v.rmin = rssi;
       if (rssi > v.rmax) v.rmax = rssi;
       if (vend.score > v.vscore) { v.cat = vend.cat; v.vkind = vend.kind; v.vcode = vend.code; v.vscore = vend.score; }
@@ -123,6 +129,7 @@ class ScanCB : public NimBLEScanCallbacks {
       Dev nd; memset(&nd, 0, sizeof(nd));
       nd.t = now; nd.first = now; nd.sig = sig; nd.pkts = 1;
       nd.rssi = nd.rssiS = nd.rmin = nd.rmax = (int8_t)rssi;
+      nd.rssiF = (float)rssi;
       nd.cat = vend.cat; nd.vkind = vend.kind; nd.vcode = vend.code; nd.vscore = vend.score;
       nd.type = type; nd.akind = akind; nd.rnd = rnd;
       memcpy(nd.mac, mac, 6);
@@ -718,10 +725,9 @@ void bleForEachEnt(BleEntCb cb, void* ctx) {
       if (msSince(now, d.t) > 15000 || d.rssiS < -102) continue;
       Agg& a = locEnts[d.ent];
       float ageS = msSince(now, d.t) / 1000.0f;
-      float w = 1.0f / (1.0f + ageS * 0.4f);
-      // Use smoothed rssiS + subtle rmax envelope (no raw single-packet d.rssi jitter!)
-      float rSub = d.rssiS * 0.85f + d.rmax * 0.15f;
-      a.rssiSum += rSub * w;
+      float w = 1.0f / (1.0f + ageS * 0.5f);
+      // True sub-decibel anti-multipath rssiF (no stale all-time rmax bias, no integer rounding!)
+      a.rssiSum += d.rssiF * w;
       a.weightSum += w;
       if (a.t == 0 || d.rssi > a.peakRssi) a.peakRssi = d.rssi;
       if (d.t >= a.t) a.t = d.t;

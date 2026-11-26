@@ -14,7 +14,7 @@ bool locWebUse();
 void locWebStop();
 void locTick(uint32_t now);
 void locJson(String& out);
-bool locCalibrate(String& out);
+bool locCalibrate(String& out, uint32_t targetId = 0);
 void locSetBase(float meters);
 float locGetBase();
 int   locGetOffset();

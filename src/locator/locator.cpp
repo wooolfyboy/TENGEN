@@ -244,8 +244,10 @@ static void locStart() {
     esp_wifi_set_promiscuous(false);
     s_ownWifi = true;
   } else {
-    // Web AP is already on Channel 6; cancel any in-flight scan so channel stays pinned at 6
+    // Web AP is already on Channel 6; cancel any in-flight scan and ensure channel is pinned to 6
     esp_wifi_scan_stop();
+    WiFi.scanDelete();
+    esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
     s_ownWifi = false;
   }
   esp_wifi_set_ps(WIFI_PS_NONE);          // zero Wi-Fi sleep latency for incoming ESP-NOW packets
@@ -289,16 +291,20 @@ void locSetBase(float meters) {
 float locGetBase() { loadPrefs(); return s_baseM; }
 int   locGetOffset() { loadPrefs(); return s_offsetDb; }
 
-// 1-tap calibration: finds the strongest device currently heard by BOTH sticks
-// and sets s_offsetDb so both sticks report equal signal for a centered phone.
-bool locCalibrate(String& out) {
+// 1-tap calibration: uses the user-selected targetId if provided, otherwise picks
+// the best centered phone/device (penalizing extreme one-sided desktop PCs glued to one stick!).
+bool locCalibrate(String& out, uint32_t targetId) {
   loadPrefs();
   int bestIdx = -1;
-  float bestScore = -999.0f;
+  float bestScore = -9999.0f;
   for (int i = 0; i < s_nNodes; i++) {
     const LocNode& n = s_nodes[i];
     if (!n.has1 || !n.has2) continue;
-    float score = n.r1F + n.r2RawF;
+    if (targetId != 0 && n.id == targetId) { bestIdx = i; break; }
+    // Prefer phones & balanced signals over a PC sitting right on top of one stick
+    float asym = fabsf(n.r1F - (n.r2RawF + 6.0f));
+    float typeBonus = (n.rawType == T_PHONE) ? 14.0f : (n.rawType == T_COMPUTER || n.rawType == T_TV ? -8.0f : 0.0f);
+    float score = (n.r1F + n.r2RawF) - asym * 0.85f + typeBonus;
     if (score > bestScore) { bestScore = score; bestIdx = i; }
   }
   if (bestIdx < 0) {
@@ -310,6 +316,15 @@ bool locCalibrate(String& out) {
   const LocNode& b = s_nodes[bestIdx];
   s_offsetDb = constrain((int)lroundf(b.r1F - b.r2RawF), -20, 25);
   savePrefs();
+  // Immediately re-anchor r2F on all nodes so calibration takes effect without Kalman lag
+  for (int i = 0; i < s_nNodes; i++) {
+    if (s_nodes[i].has2) {
+      s_nodes[i].r2F = constrain(s_nodes[i].r2RawF + (float)s_offsetDb, -105.0f, -25.0f);
+      s_nodes[i].r2 = (int)lroundf(s_nodes[i].r2F);
+      s_nodes[i].r2Var = 2.0f;
+      s_nodes[i].targetZ = 0.0f;
+    }
+  }
   snprintf(s_calMsg, sizeof(s_calMsg), L("CAL OK: %+d dB", "КАЛИБРОВКА: %+d дБ"), s_offsetDb);
   s_calToastMs = millis();
   out = "{\"ok\":true,\"ofs\":"; out += s_offsetDb;
@@ -415,9 +430,9 @@ static void recomputeNodes(uint32_t now) {
     float calR2 = constrain(n.r2RawF + (float)s_offsetDb, -105.0f, -25.0f);
     kalmanRssi(n.r2F, n.r2Var, calR2);
     n.r2 = (int)lroundf(n.r2F);
-    n.rawType = matches[k].type;
-    strlcpy(n.type, typeName(matches[k].type), sizeof(n.type));
-    snprintf(n.name, sizeof(n.name), "EAR %02X:%02X", matches[k].mac[5], matches[k].mac[4]);
+    if (!n.rawType && matches[k].type) n.rawType = matches[k].type;
+    if (!n.type[0] || !strcmp(n.type, "unknown")) strlcpy(n.type, typeName(n.rawType), sizeof(n.type));
+    if (!n.name[0]) snprintf(n.name, sizeof(n.name), "EAR %02X:%02X", matches[k].mac[5], matches[k].mac[4]);
     n.seenMs = now;
   }
 
@@ -448,39 +463,42 @@ static void recomputeNodes(uint32_t now) {
       matched++;
       float d1 = rssiToMeters(n.r1F, n.rawType);
       float d2 = rssiToMeters(n.r2F, n.rawType);
-
       float sumD = d1 + d2;
-      float resid = 0.0f;
-      if (sumD < D * 1.04f) {
-        resid = (D * 1.04f - sumD);
-        float scale = (D * 1.04f) / max(0.2f, sumD);
-        d1 *= scale;
-        d2 *= scale;
+
+      if (sumD <= D * 1.02f) {
+        // Near-field between the two sticks: maximum-likelihood projection onto the baseline segment
+        // preserves exact proximity ratio (d1 - d2)/(d1 + d2) without pushing close devices away!
+        float ratio = (d1 - d2) / max(0.25f, sumD);
+        tx = ratio * halfD + (idPhase - 0.5f) * 0.06f;
+        tz = constrain(0.18f + 0.24f * sumD + (idPhase - 0.5f) * 0.04f, 0.18f, halfD * 0.85f);
+        terr = constrain(0.24f + 0.15f * sumD, 0.24f, 1.2f);
+      } else {
+        float resid = 0.0f;
+        float diffD = d1 - d2;
+        if (fabsf(diffD) > D * 0.94f) {
+          resid = fabsf(diffD) - D * 0.94f;
+          float mid = 0.5f * (d1 + d2);
+          float capped = (diffD > 0 ? 1.0f : -1.0f) * D * 0.94f;
+          d1 = mid + 0.5f * capped;
+          d2 = mid - 0.5f * capped;
+        }
+
+        float xTri = (d1 * d1 - d2 * d2) / (2.0f * D);
+        float rMean = sqrtf(d1 * d2);
+        float sinTh = tanhf((n.r2F - n.r1F) / 11.5f);
+        float xHyp = sinTh * max(halfD, rMean * 0.85f);
+        tx = xTri * 0.65f + xHyp * 0.35f + (idPhase - 0.5f) * 0.08f;
+        tx = constrain(tx, -D * 1.35f, D * 1.35f);
+
+        float dx1 = tx + halfD, dx2 = tx - halfD;
+        float z1 = sqrtf(max(0.06f, d1 * d1 - dx1 * dx1));
+        float z2 = sqrtf(max(0.06f, d2 * d2 - dx2 * dx2));
+        float w1 = 1.0f / (0.3f + d1), w2 = 1.0f / (0.3f + d2);
+        tz = (z1 * w1 + z2 * w2) / (w1 + w2) + (idPhase - 0.5f) * 0.06f;
+        tz = constrain(tz, 0.22f, D * 2.4f);
+
+        terr = constrain(0.28f + 0.14f * rMean + resid * 0.22f, 0.28f, 2.6f);
       }
-      float diffD = d1 - d2;
-      if (fabsf(diffD) > D * 0.94f) {
-        resid += fabsf(diffD) - D * 0.94f;
-        float mid = 0.5f * (d1 + d2);
-        float capped = (diffD > 0 ? 1.0f : -1.0f) * D * 0.94f;
-        d1 = mid + 0.5f * capped;
-        d2 = mid - 0.5f * capped;
-      }
-
-      float xTri = (d1 * d1 - d2 * d2) / (2.0f * D);
-      float rMean = sqrtf(d1 * d2);
-      float sinTh = tanhf((n.r2F - n.r1F) / 11.5f);
-      float xHyp = sinTh * max(halfD, rMean * 0.85f);
-      tx = xTri * 0.65f + xHyp * 0.35f + (idPhase - 0.5f) * 0.08f;
-      tx = constrain(tx, -D * 1.35f, D * 1.35f);
-
-      float dx1 = tx + halfD, dx2 = tx - halfD;
-      float z1 = sqrtf(max(0.09f, d1 * d1 - dx1 * dx1));
-      float z2 = sqrtf(max(0.09f, d2 * d2 - dx2 * dx2));
-      float w1 = 1.0f / (0.3f + d1), w2 = 1.0f / (0.3f + d2);
-      tz = (z1 * w1 + z2 * w2) / (w1 + w2) + (idPhase - 0.5f) * 0.06f;
-      tz = constrain(tz, 0.25f, D * 2.4f);
-
-      terr = constrain(0.28f + 0.14f * rMean + resid * 0.25f, 0.28f, 2.6f);
     } else if (n.has1) {
       float d1 = rssiToMeters(n.r1F, n.rawType);
       float ang = idPhase * 2.1f - 1.25f;

@@ -515,7 +515,11 @@ static bool apiHandle(const char* path, const ApiArgs& A, String& o) {
   if (is("/api/loc2x")) {
     s_locMs = millis();
     s_locOn = locWebUse();
-    if (A.get("a") == "cal") { locCalibrate(o); return true; }
+    if (A.get("a") == "cal") {
+      uint32_t tid = A.has("id") ? (uint32_t)strtoul(A.get("id").c_str(), nullptr, 10) : 0;
+      locCalibrate(o, tid);
+      return true;
+    }
     if (A.has("base")) locSetBase(A.get("base").toFloat());
     locJson(o);
     return true;

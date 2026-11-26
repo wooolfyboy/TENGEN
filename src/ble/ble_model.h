@@ -37,6 +37,7 @@ struct Dev {
   uint32_t pkts;     // packets caught
   int8_t   rssi;     // last signal
   int8_t   rssiS;    // smoothed signal (for sorting)
+  float    rssiF;    // sub-decibel floating-point smoothed signal (for Locator 2x)
   int8_t   rmin, rmax;
   uint8_t  cat;      // brand (V_* / index in BRANDS)
   uint8_t  vkind;    // how the vendor was found: 0 none, 1 Company ID, 2 service UUID

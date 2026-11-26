@@ -5,7 +5,8 @@
 // device naming right from the 3D scene, baseline distance adjustment, and 1-tap calibration.
 (() => {
 const TRAIL_MAX = 16;
-const rssiToM = r => Math.max(0.25, Math.min(14, Math.pow(10, (-58 - r) / 22)));
+const TX_REF = { computer: -53.5, TV: -53.5, phone: -58.0, audio: -60.5, watch: -63.0, tracker: -62.5 };
+const rssiToM = (r, type) => Math.max(0.20, Math.min(14, Math.pow(10, ((TX_REF[type] ?? -58.5) - r) / 22.5)));
 const FILTERS = ['ALL', '2X ONLY', 'NEAR'];
 
 T.hqLoc = {
@@ -59,7 +60,8 @@ T.hqLoc = {
 
   calibrate() {
     this.toast(T.tr('CALIBRATING...'));
-    fetch(T.apiBase() + '/api/loc2x?a=cal', { cache: 'no-store' })
+    const q = (this.sel && this.sel.both) ? `&id=${this.sel.id}` : '';
+    fetch(T.apiBase() + '/api/loc2x?a=cal' + q, { cache: 'no-store' })
       .then(r => r.json())
       .then(d => {
         if (d && d.ok) {
@@ -427,8 +429,8 @@ T.hqLoc = {
       T.txt(g, '✎ ' + T.tr('NAME'), nbX + nbW / 2, nbY + nbH * 0.72, u * 0.66, cHot, 'm', 'center');
       T.hits.rect(nbX, nbY - 4, nbW, nbH + 8, { act: 'name' });
 
-      const d1 = (s.mask & 1) ? rssiToM(s.r1).toFixed(1) + 'm (' + s.r1 + ' dBm)' : '—';
-      const d2 = (s.mask & 2) ? rssiToM(s.r2).toFixed(1) + 'm (' + s.r2 + ' dBm)' : '—';
+      const d1 = (s.mask & 1) ? rssiToM(s.r1, s.type).toFixed(1) + 'm (' + s.r1 + ' dBm)' : '—';
+      const d2 = (s.mask & 2) ? rssiToM(s.r2, s.type).toFixed(1) + 'm (' + s.r2 + ' dBm)' : '—';
       T.txt(g, `#1: ${d1}  ·  #2: ${d2}`, cx0 + u * 0.7, cy0 + u * 3.35, u * 0.72, cAcc, 'm', 'left');
       const posStr = s.both
         ? `X: ${s.rx >= 0 ? '+' : ''}${s.rx.toFixed(1)}m · Z: ${s.rz.toFixed(1)}m · ±${s.rerr.toFixed(1)}m`
