@@ -85,6 +85,8 @@ static SemaphoreHandle_t s_locLock = nullptr;
 static bool      s_on = false;
 static bool      s_ownWifi = false;
 static bool      s_espNowOk = false;
+static uint8_t   s_earMac[6] = {0};
+static bool      s_earPeerAdded = false;
 static uint32_t  s_earSeenMs = 0;
 static uint8_t   s_earBat = 0;
 static uint8_t   s_earFlags = 0;
@@ -173,6 +175,9 @@ static void onEspNowRecv(const esp_now_recv_info_t* info, const uint8_t* data, i
   if (info && info->rx_ctrl) {
     s_earLinkRssi = (s_earLinkRssi * 3 + info->rx_ctrl->rssi) / 4;
   }
+  if (info && info->src_addr) {
+    memcpy(s_earMac, info->src_addr, 6);
+  }
 
   for (int i = 0; i < cnt; i++) {
     const EarEntry& e = pkt->entries[i];
@@ -222,6 +227,7 @@ static void stopEspNow() {
   esp_now_unregister_recv_cb();
   esp_now_deinit();
   s_espNowOk = false;
+  s_earPeerAdded = false;
 }
 
 static void locStart() {
@@ -552,10 +558,19 @@ void locTick(uint32_t now) {
     s_calcMs = now;
     recomputeNodes(now);
   }
-  // Broadcast heartbeat ACK ("TGNA") once a second so M5StickC Plus Ear #2 shows "LINK OK"
-  if (s_espNowOk && msSince(now, s_ackMs) >= 900) {
+  // Send heartbeat ACK ("TGNA") every 600 ms (both Unicast with hardware retry + Broadcast)
+  if (s_espNowOk && msSince(now, s_ackMs) >= 600) {
     s_ackMs = now;
     AckPacket ack = { {'T', 'G', 'N', 'A'}, 6, 1, s_matchedCnt };
+    if (!s_earPeerAdded && (s_earMac[0] | s_earMac[1] | s_earMac[2])) {
+      esp_now_peer_info_t p;
+      memset(&p, 0, sizeof(p));
+      memcpy(p.peer_addr, s_earMac, 6);
+      p.channel = 0;
+      p.encrypt = false;
+      if (esp_now_add_peer(&p) == ESP_OK || esp_now_is_peer_exist(s_earMac)) s_earPeerAdded = true;
+    }
+    if (s_earPeerAdded) esp_now_send(s_earMac, (const uint8_t*)&ack, sizeof(ack));
     uint8_t bcast[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
     esp_now_send(bcast, (const uint8_t*)&ack, sizeof(ack));
   }
@@ -565,7 +580,7 @@ void locTick(uint32_t now) {
 void locJson(String& o) {
   loadPrefs();
   uint32_t now = millis();
-  bool earLive = s_earSeenMs && msSince(now, s_earSeenMs) < 4500;
+  bool earLive = s_earSeenMs && msSince(now, s_earSeenMs) < 10000;
   int n = min(s_nNodes, 40);
   o.reserve(160 + n * 88);
   o = "{\"on\":"; o += s_on ? 1 : 0;
@@ -606,7 +621,7 @@ static void iconLocator(int x, int y, uint16_t c, uint16_t bg) {
 
 static void locSubtitle(char* out, size_t n) {
   uint32_t now = millis();
-  bool earLive = s_earSeenMs && msSince(now, s_earSeenMs) < 4500;
+  bool earLive = s_earSeenMs && msSince(now, s_earSeenMs) < 10000;
   if (s_on && earLive) snprintf(out, n, L("%u locked", "%u пеленг"), (unsigned)s_matchedCnt);
   else if (s_on)       snprintf(out, n, "%s", L("wait ear#2", "жду ухо #2"));
   else                 snprintf(out, n, "%s", L("2x radar", "2 палки"));
@@ -622,7 +637,7 @@ static void locDraw(uint32_t now) {
   uint16_t bg = C_BG(), acc = C_ACC(), hot = C_HOT(), dim = UI_DIM(), line = UI_LINE(), al = C_ALERT();
   spr.fillSprite(bg);
 
-  bool earLive = s_earSeenMs && msSince(now, s_earSeenMs) < 4500;
+  bool earLive = s_earSeenMs && msSince(now, s_earSeenMs) < 10000;
   char right[40];
   if (earLive) snprintf(right, sizeof(right), L("EAR#2 %u%% · %.1fM", "УХО#2 %u%% · %.1fМ"), (unsigned)s_earBat, s_baseM);
   else         snprintf(right, sizeof(right), L("WAIT EAR#2 · %.1fM", "ЖДУ УХО#2 · %.1fМ"), s_baseM);

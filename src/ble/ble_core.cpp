@@ -681,12 +681,14 @@ void bleLocatorBoost(bool on) {
   NimBLEScan* s = NimBLEDevice::getScan();
   bool was = g_bleActive;
   if (was) s->stop();
-  s->setActiveScan(true);
   if (on) {
-    // 50% duty cycle (25 ms BLE / 25 ms Wi-Fi every 50 ms) so ESP-NOW packets on Ch 6 never get starved!
-    s->setInterval(80);
-    s->setWindow(42);
+    // Passive scan in Locator mode: hears all advertisements down to -102 dBm
+    // without transmitting SCAN_REQ bursts that block Channel 6 ESP-NOW reception!
+    s->setActiveScan(false);
+    s->setInterval(96);   // 60 ms cycle
+    s->setWindow(38);     // 23.75 ms BLE / 36.25 ms Wi-Fi Ch 6 ESP-NOW
   } else {
+    s->setActiveScan(true);
     s->setInterval(100);
     s->setWindow(45);
   }

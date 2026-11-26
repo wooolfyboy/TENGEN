@@ -184,17 +184,19 @@ static uint32_t s_txMs = 0;
 static uint32_t s_drawMs = 0;
 static uint32_t s_seq = 0;
 static volatile uint32_t s_ackMs = 0;
+static uint8_t  s_masterMac[6] = {0};
+static bool     s_masterPeerAdded = false;
 
 #if ESP_IDF_VERSION_MAJOR >= 5
 static void onEspNowRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
-  (void)info;
+  const uint8_t* mac = info ? info->src_addr : nullptr;
 #else
 static void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
-  (void)mac;
 #endif
   if (!data || len < (int)sizeof(AckPacket)) return;
   if (memcmp(data, "TGNA", 4) != 0) return;
   s_ackMs = millis();
+  if (mac) memcpy(s_masterMac, mac, 6);
 }
 
 static void radiosStart() {
@@ -204,7 +206,9 @@ static void radiosStart() {
   esp_wifi_set_channel(TENGEN_CH, WIFI_SECOND_CHAN_NONE);
   esp_wifi_set_promiscuous(false);
   esp_wifi_set_ps(WIFI_PS_NONE); // required for unassociated WIFI_STA ESP-NOW + BLE coexistence
+  esp_wifi_set_max_tx_power(78); // full 19.5 dBm TX power for rock-solid link
 
+  s_masterPeerAdded = false;
   if (esp_now_init() == ESP_OK) {
     esp_now_register_recv_cb(onEspNowRecv);
     esp_now_peer_info_t peer;
@@ -218,8 +222,8 @@ static void radiosStart() {
   NimBLEScan* scan = NimBLEDevice::getScan();
   scan->setScanCallbacks(&s_scanCb, true);
   scan->setActiveScan(false);
-  scan->setInterval(80);
-  scan->setWindow(45);
+  scan->setInterval(96);   // 60 ms cycle
+  scan->setWindow(38);     // 23.75 ms BLE / 36.25 ms Wi-Fi ESP-NOW
   scan->setMaxResults(0);
   scan->start(0, false);
 }
@@ -228,6 +232,7 @@ static void radiosStop() {
   NimBLEDevice::getScan()->stop();
   esp_now_unregister_recv_cb();
   esp_now_deinit();
+  s_masterPeerAdded = false;
   WiFi.mode(WIFI_OFF);
   if (s_lock && xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
     s_nDevs = 0;
@@ -248,7 +253,7 @@ static void sendPacket(uint32_t now) {
   if (s_lock && xSemaphoreTake(s_lock, pdMS_TO_TICKS(15)) == pdTRUE) {
     int w = 0;
     for (int i = 0; i < s_nDevs; i++) {
-      if (now - s_devs[i].seenMs < 10000) s_devs[w++] = s_devs[i];
+      if (now - s_devs[i].seenMs < 12000) s_devs[w++] = s_devs[i];
     }
     s_nDevs = w;
     std::sort(s_devs, s_devs + s_nDevs, [](const SeenDev& a, const SeenDev& b) { return a.rssiS > b.rssiS; });
@@ -262,11 +267,28 @@ static void sendPacket(uint32_t now) {
     xSemaphoreGive(s_lock);
   }
 
-  uint8_t bcast[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+  // Auto-register T-Embed's MAC for Unicast 802.11 hardware-retried delivery!
+  if (!s_masterPeerAdded && (s_masterMac[0] | s_masterMac[1] | s_masterMac[2])) {
+    esp_now_peer_info_t p;
+    memset(&p, 0, sizeof(p));
+    memcpy(p.peer_addr, s_masterMac, 6);
+    p.channel = 0;
+    p.encrypt = false;
+    if (esp_now_add_peer(&p) == ESP_OK || esp_now_is_peer_exist(s_masterMac)) s_masterPeerAdded = true;
+  }
+
   size_t len = 12 + pkt.count * sizeof(EarEntry);
-  esp_now_send(bcast, (const uint8_t*)&pkt, len);
-  delay(24); // second micro-burst 24 ms later guarantees hitting T-Embed's Wi-Fi coexistence window
-  esp_now_send(bcast, (const uint8_t*)&pkt, len);
+  uint8_t bcast[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+  if (s_masterPeerAdded) {
+    // Unicast has automatic 802.11 MAC-layer retries until T-Embed hardware-ACKs!
+    esp_now_send(s_masterMac, (const uint8_t*)&pkt, len);
+    delay(18);
+    esp_now_send(bcast, (const uint8_t*)&pkt, len);
+  } else {
+    esp_now_send(bcast, (const uint8_t*)&pkt, len);
+    delay(20);
+    esp_now_send(bcast, (const uint8_t*)&pkt, len);
+  }
 }
 
 // Minimal direct screen draw (no RAM sprite, redrawn only every 5s or on button press)
@@ -368,8 +390,8 @@ void loop() {
   prevB = curB;
 
   if (s_active) {
-    // Transmit every 650 ms with a 24 ms twin-packet so T-Embed never misses a frame
-    if (now - s_txMs >= 650) {
+    // Transmit every 500 ms with Unicast hardware retry + Broadcast backup
+    if (now - s_txMs >= 500) {
       s_txMs = now;
       sendPacket(now);
     }
