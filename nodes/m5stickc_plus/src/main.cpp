@@ -1,13 +1,17 @@
 // ============================================================
-//  TENGEN EAR #2 — Satellite BLE Scanner for M5StickC Plus
+//  TENGEN EAR #2 — Ultra-Low-Power Edition for M5StickC Plus
 //
-//  Listens to BLE advertisements, smooths RSSI, and transmits
-//  compact ESP-NOW summaries ("TGN1") on Channel 6 to the main
-//  T-Embed CC1101 Plus running TENGEN Locator 2x.
+//  Power-saving design for the small 120 mAh battery:
+//  - CPU locked at 80 MHz (instead of 240 MHz -> cuts CPU current by >50%)
+//  - Minimal static screen ("ON" / "OFF" + battery %, redrawn only every 5s)
+//  - Dimmed AXP192 backlight voltage (2.7V) + ST7789 hardware sleep when dark
+//  - Gentle 30% BLE duty cycle + 1.2s ESP-NOW interval + Wi-Fi modem sleep
+//  - In "OFF" mode: Wi-Fi & BLE radios completely powered down, screen sleeps
+//    after 6 seconds -> near-zero standby drain.
 //
-//  Controls on M5StickC Plus:
-//  - Front Button [M5] (GPIO 37): Toggle screen ON/OFF to save battery
-//  - Side Button  [B]  (GPIO 39): Force immediate ping / clear stale list
+//  Controls:
+//  - Front Button [M5] (GPIO 37): Toggle ON / OFF mode
+//  - Side Button  [B]  (GPIO 39): Toggle screen backlight while ON (stealth)
 // ============================================================
 #include <Arduino.h>
 #include <Wire.h>
@@ -19,13 +23,12 @@
 #include <vector>
 #include <algorithm>
 
-#define BTN_A_PIN  37
-#define BTN_B_PIN  39
-#define LED_PIN    10   // active LOW on M5StickC Plus
+#define BTN_A_PIN  37   // Front [M5] button: ON / OFF toggle
+#define BTN_B_PIN  39   // Side button: screen backlight toggle while ON
+#define LED_PIN    10   // Red LED (active LOW) — kept OFF to save power
 #define AXP_ADDR   0x34
 #define TENGEN_CH  6
 
-// ---------- Shared ESP-NOW Binary Protocol ----------
 #pragma pack(push, 1)
 struct EarEntry {
   uint8_t mac[6];
@@ -49,7 +52,7 @@ struct AckPacket {
 };
 #pragma pack(pop)
 
-// ---------- AXP192 Power Management (M5StickC Plus) ----------
+// ---------- AXP192 Power Management ----------
 static void axpWrite(uint8_t reg, uint8_t val) {
   Wire.beginTransmission(AXP_ADDR);
   Wire.write(reg);
@@ -68,30 +71,43 @@ static uint8_t axpRead8(uint8_t reg) {
 static void axpBegin() {
   Wire.begin(21, 22, 400000);
   axpWrite(0x10, 0xFF);   // EXTEN & DC-DC2
-  axpWrite(0x28, 0xCC);   // LDO2 (backlight 3.0V) & LDO3 (TFT logic 3.0V)
-  axpWrite(0x82, 0xFF);   // Enable all battery V/I ADCs
+  axpWrite(0x28, 0x9C);   // LDO2 (backlight dimmed to 2.7V = huge power saving!) & LDO3 (TFT 3.0V)
+  axpWrite(0x82, 0x83);   // Only battery V/I ADC enabled (disable unused ADCs)
   axpWrite(0x33, 0xC0);   // Charge 4.2V, 100mA
-  axpWrite(0xB8, 0x80);   // Coulomb counter enable
-  axpWrite(0x12, 0x4D);   // Enable DCDC1, DCDC3, LDO2, LDO3, EXTEN
-  axpWrite(0x36, 0x5C);   // PEK power button timing (4s shutdown)
+  axpWrite(0x12, 0x0D);   // Enable DCDC1, LDO2, LDO3 (disable unused DCDC3/EXTEN5V!)
+  axpWrite(0x36, 0x5C);   // Power button timing (4s hard power-off)
 }
 
-static void axpScreenPower(bool on) {
-  uint8_t v = axpRead8(0x12);
-  if (on) v |= 0x04; else v &= ~0x04;   // bit 2 = LDO2 (TFT backlight)
-  axpWrite(0x12, v);
+static TFT_eSPI tft = TFT_eSPI();
+static bool s_lcdAwake = true;
+
+static void setScreenPower(bool on) {
+  if (s_lcdAwake == on) return;
+  s_lcdAwake = on;
+  if (on) {
+    uint8_t v = axpRead8(0x12) | 0x04;  // LDO2 ON
+    axpWrite(0x12, v);
+    tft.writecommand(0x11);             // ST7789 Sleep Out
+    delay(20);
+    tft.writecommand(0x29);             // Display ON
+  } else {
+    tft.writecommand(0x28);             // Display OFF
+    tft.writecommand(0x10);             // ST7789 Sleep In (<0.05 mA)
+    uint8_t v = axpRead8(0x12) & ~0x04; // LDO2 Backlight OFF
+    axpWrite(0x12, v);
+  }
 }
 
 static uint8_t axpBatPct(bool& usbOrChg) {
   uint8_t st0 = axpRead8(0x00);
-  usbOrChg = (st0 & 0x24) != 0;         // VBUS present or charging
+  usbOrChg = (st0 & 0x24) != 0;
   uint16_t hi = axpRead8(0x78), lo = axpRead8(0x79);
   float mv = ((hi << 4) | (lo & 0x0F)) * 1.1f;
   int pct = (int)((mv - 3300.0f) * 100.0f / (4150.0f - 3300.0f));
   return (uint8_t)constrain(pct, 0, 100);
 }
 
-// ---------- BLE Device Table ----------
+// ---------- BLE Table ----------
 struct SeenDev {
   uint8_t  mac[6];
   float    rssiS;
@@ -99,12 +115,11 @@ struct SeenDev {
   uint32_t seenMs;
 };
 
-static const int MAX_SEEN = 64;
+static const int MAX_SEEN = 48;
 static SeenDev   s_devs[MAX_SEEN];
 static int       s_nDevs = 0;
 static SemaphoreHandle_t s_lock = nullptr;
 
-// Basic advertisement type classifier (matches T-Embed DevType enum: 0=unknown,1=phone,2=audio,4=watch,6=tracker)
 static uint8_t classifyAdv(const uint8_t* p, size_t len) {
   size_t i = 0;
   while (i + 1 < len) {
@@ -116,13 +131,13 @@ static uint8_t classifyAdv(const uint8_t* p, size_t len) {
     if (ft == 0xFF && dlen >= 2) {
       uint16_t cid = fd[0] | (fd[1] << 8);
       if (cid == 0x004C && dlen >= 3) {
-        if (fd[2] == 0x12 || fd[2] == 0x07) return fd[2] == 0x12 ? 6 : 2; // AirTag/FindMy or AirPods
-        return 1; // Apple phone/watch
+        if (fd[2] == 0x12 || fd[2] == 0x07) return fd[2] == 0x12 ? 6 : 2;
+        return 1;
       }
-      if (cid == 0x0075 || cid == 0x00E0) return 1; // Samsung / Google
+      if (cid == 0x0075 || cid == 0x00E0) return 1;
     } else if ((ft == 0x02 || ft == 0x03 || ft == 0x16) && dlen >= 2) {
       uint16_t u = fd[0] | (fd[1] << 8);
-      if (u == 0xFEED || u == 0xFD5A || u == 0xFEAA) return 6; // Tile / SmartTag / Tracker
+      if (u == 0xFEED || u == 0xFD5A || u == 0xFEAA) return 6;
       if (u == 0xFE2C || u == 0x180D) return 2;
     }
     i += fl + 1;
@@ -160,14 +175,15 @@ class EarScanCB : public NimBLEScanCallbacks {
 };
 static EarScanCB s_scanCb;
 
-// ---------- ESP-NOW Link State ----------
-static volatile uint32_t s_ackMs = 0;
-static volatile uint16_t s_matched = 0;
-static volatile uint32_t s_ledOffMs = 0;
-static uint32_t s_seq = 0;
+// ---------- State ----------
+static bool     s_active = true;     // ON / OFF mode toggled by [M5] button
+static bool     s_stealth = false;   // Screen off while ON (toggled by side [B] button)
+static bool     s_needDraw = true;
+static uint32_t s_modeChangeMs = 0;
 static uint32_t s_txMs = 0;
 static uint32_t s_drawMs = 0;
-static bool     s_screenOn = true;
+static uint32_t s_seq = 0;
+static volatile uint32_t s_ackMs = 0;
 
 #if ESP_IDF_VERSION_MAJOR >= 5
 static void onEspNowRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
@@ -178,16 +194,46 @@ static void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
 #endif
   if (!data || len < (int)sizeof(AckPacket)) return;
   if (memcmp(data, "TGNA", 4) != 0) return;
-  const AckPacket* ack = (const AckPacket*)data;
   s_ackMs = millis();
-  s_matched = ack->matched;
-  digitalWrite(LED_PIN, LOW); // brief blink on ACK
-  s_ledOffMs = s_ackMs + 15;
 }
 
-// ---------- Display (240x135 TENGEN HUD) ----------
-static TFT_eSPI tft = TFT_eSPI();
-static TFT_eSprite spr = TFT_eSprite(&tft);
+static void radiosStart() {
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_channel(TENGEN_CH, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous(false);
+  esp_wifi_set_ps(WIFI_PS_MIN_MODEM);   // sleep Wi-Fi modem between packets
+
+  if (esp_now_init() == ESP_OK) {
+    esp_now_register_recv_cb(onEspNowRecv);
+    esp_now_peer_info_t peer;
+    memset(&peer, 0, sizeof(peer));
+    memset(peer.peer_addr, 0xFF, 6);
+    peer.channel = 0;
+    peer.encrypt = false;
+    esp_now_add_peer(&peer);
+  }
+
+  NimBLEScan* scan = NimBLEDevice::getScan();
+  scan->setScanCallbacks(&s_scanCb, true);
+  scan->setActiveScan(false);
+  scan->setInterval(80);
+  scan->setWindow(45);
+  scan->setMaxResults(0);
+  scan->start(0, false);
+}
+
+static void radiosStop() {
+  NimBLEDevice::getScan()->stop();
+  esp_now_unregister_recv_cb();
+  esp_now_deinit();
+  WiFi.mode(WIFI_OFF);
+  if (s_lock && xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
+    s_nDevs = 0;
+    xSemaphoreGive(s_lock);
+  }
+}
 
 static void sendPacket(uint32_t now) {
   EarPacket pkt;
@@ -200,7 +246,6 @@ static void sendPacket(uint32_t now) {
   pkt.seq = ++s_seq;
 
   if (s_lock && xSemaphoreTake(s_lock, pdMS_TO_TICKS(15)) == pdTRUE) {
-    // Prune stale (> 10 s)
     int w = 0;
     for (int i = 0; i < s_nDevs; i++) {
       if (now - s_devs[i].seenMs < 10000) s_devs[w++] = s_devs[i];
@@ -222,153 +267,126 @@ static void sendPacket(uint32_t now) {
   esp_now_send(bcast, (const uint8_t*)&pkt, len);
 }
 
-static void drawHud(uint32_t now) {
-  if (!s_screenOn) return;
-  const uint16_t bg = tft.color565(5, 8, 13);
+// Minimal direct screen draw (no RAM sprite, redrawn only every 5s or on button press)
+static void drawMinimal(uint32_t now) {
+  if (!s_lcdAwake) return;
+  const uint16_t bg  = TFT_BLACK;
+  const uint16_t grn = tft.color565(90, 245, 100);
   const uint16_t acc = tft.color565(62, 230, 255);
-  const uint16_t hot = tft.color565(235, 250, 255);
-  const uint16_t grn = tft.color565(105, 255, 110);
-  const uint16_t org = tft.color565(255, 140, 26);
-  const uint16_t dim = tft.color565(90, 112, 128);
-  const uint16_t line = tft.color565(32, 50, 64);
+  const uint16_t dim = tft.color565(80, 95, 110);
+  const uint16_t org = tft.color565(240, 120, 30);
 
-  spr.fillSprite(bg);
-  bool linked = s_ackMs && (now - s_ackMs < 3500);
+  tft.fillScreen(bg);
   bool usb = false;
   uint8_t bat = axpBatPct(usb);
+  bool linked = s_active && s_ackMs && (now - s_ackMs < 4000);
 
-  // Header
-  spr.setTextDatum(TL_DATUM);
-  spr.setTextColor(acc, bg);
-  spr.drawString("// TENGEN EAR #2", 8, 5, 2);
-  char bStr[24];
-  snprintf(bStr, sizeof(bStr), "%s%u%%", usb ? "CHG " : "BAT ", (unsigned)bat);
-  spr.setTextDatum(TR_DATUM);
-  spr.setTextColor(bat <= 20 ? org : hot, bg);
-  spr.drawString(bStr, 232, 5, 2);
-  spr.drawFastHLine(8, 23, 224, acc);
+  // Top line: EAR #2 & Battery
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(dim, bg);
+  tft.drawString("EAR #2", 10, 8, 2);
 
-  // Left: live mini-radar
-  const int rcx = 54, rcy = 76, rr = 38;
-  spr.drawCircle(rcx, rcy, rr, line);
-  spr.drawCircle(rcx, rcy, rr * 2 / 3, line);
-  spr.drawCircle(rcx, rcy, rr / 3, line);
-  float sw = (now % 2400) / 2400.0f * 6.2831853f;
-  spr.drawLine(rcx, rcy, rcx + (int)(cosf(sw) * rr), rcy + (int)(sinf(sw) * rr), linked ? grn : acc);
-  for (int i = 0; i < min(s_nDevs, 14); i++) {
-    uint32_t h = (s_devs[i].mac[0] * 31u + s_devs[i].mac[1] * 17u + s_devs[i].mac[2]) % 360u;
-    float a = h * (6.2831853f / 360.0f);
-    float norm = constrain((-s_devs[i].rssiS - 35.0f) / 60.0f, 0.15f, 0.95f);
-    int px = rcx + (int)(cosf(a) * rr * norm);
-    int py = rcy + (int)(sinf(a) * rr * norm);
-    spr.fillCircle(px, py, 2, s_devs[i].type == 6 ? org : hot);
+  char bStr[20];
+  snprintf(bStr, sizeof(bStr), "%s%u%%", usb ? "⚡" : "", (unsigned)bat);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(bat <= 20 ? org : dim, bg);
+  tft.drawString(bStr, 230, 8, 2);
+
+  // Center: huge "ON" or "OFF"
+  tft.setTextDatum(MC_DATUM);
+  if (s_active) {
+    tft.setTextColor(linked ? grn : acc, bg);
+    tft.drawString("ON", 120, 66, 4);
+  } else {
+    tft.setTextColor(org, bg);
+    tft.drawString("OFF", 120, 66, 4);
   }
-  spr.fillCircle(rcx, rcy, 3, acc);
 
-  // Right: telemetry & link status
-  spr.setTextDatum(TL_DATUM);
-  spr.setTextColor(linked ? grn : org, bg);
-  spr.drawString(linked ? "LINK OK · CH 6" : "SEARCHING #1...", 106, 30, 2);
-
-  spr.setTextColor(dim, bg);
-  spr.drawString("BLE HEARD", 106, 52, 1);
-  char nStr[16];
-  snprintf(nStr, sizeof(nStr), "%d", s_nDevs);
-  spr.setTextColor(hot, bg);
-  spr.drawString(nStr, 106, 63, 4);
-
-  spr.setTextColor(dim, bg);
-  spr.drawString("2X LOCK", 176, 52, 1);
-  snprintf(nStr, sizeof(nStr), "%u", (unsigned)(linked ? s_matched : 0));
-  spr.setTextColor(linked ? grn : dim, bg);
-  spr.drawString(nStr, 176, 63, 4);
-
-  char seqStr[36];
-  snprintf(seqStr, sizeof(seqStr), "TX #%lu · [M5] SCREEN", (unsigned long)s_seq);
-  spr.setTextColor(dim, bg);
-  spr.drawString(seqStr, 106, 102, 1);
-
-  spr.drawFastHLine(8, 119, 224, line);
-  spr.setTextColor(dim, bg);
-  spr.drawString(linked ? "TENGEN LOCATOR 2X ACTIVE" : "OPEN LOCATOR ON T-EMBED / PC", 8, 123, 1);
-
-  spr.pushSprite(0, 0);
+  // Bottom hint
+  tft.setTextDatum(BC_DATUM);
+  tft.setTextColor(dim, bg);
+  if (s_active) {
+    tft.drawString(linked ? "LINK OK  ·  [M5]: OFF  ·  [B]: SCR" : "SCANNING · [M5]: OFF · [B]: SCR", 120, 128, 1);
+  } else {
+    tft.drawString("RADIOS OFF  ·  PRESS [M5] TO START", 120, 128, 1);
+  }
 }
 
 void setup() {
+  setCpuFrequencyMhz(80);   // 80 MHz cuts CPU power drain by >50%!
+
   pinMode(BTN_A_PIN, INPUT);
   pinMode(BTN_B_PIN, INPUT);
   pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, HIGH); // OFF
+  digitalWrite(LED_PIN, HIGH); // keep LED off to save ~5 mA
 
   axpBegin();
   s_lock = xSemaphoreCreateMutex();
 
   tft.init();
-  tft.setRotation(3); // Landscape 240x135 (USB-C on right/left)
+  tft.setRotation(3);
   tft.fillScreen(TFT_BLACK);
-  spr.setColorDepth(16);
-  spr.createSprite(240, 135);
 
-  // Lock Wi-Fi STA to Channel 6 for ESP-NOW
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect();
-  esp_wifi_set_promiscuous(true);
-  esp_wifi_set_channel(TENGEN_CH, WIFI_SECOND_CHAN_NONE);
-  esp_wifi_set_promiscuous(false);
-
-  if (esp_now_init() == ESP_OK) {
-    esp_now_register_recv_cb(onEspNowRecv);
-    esp_now_peer_info_t peer;
-    memset(&peer, 0, sizeof(peer));
-    memset(peer.peer_addr, 0xFF, 6);
-    peer.channel = 0;
-    peer.encrypt = false;
-    esp_now_add_peer(&peer);
-  }
-
-  // Lightweight passive BLE scanner sharing antenna time with ESP-NOW
   NimBLEDevice::init("");
-  NimBLEScan* scan = NimBLEDevice::getScan();
-  scan->setScanCallbacks(&s_scanCb, true);
-  scan->setActiveScan(false);
-  scan->setInterval(80);
-  scan->setWindow(45);
-  scan->setMaxResults(0);
-  scan->start(0, false);
+  s_active = true;
+  s_modeChangeMs = millis();
+  radiosStart();
+  drawMinimal(s_modeChangeMs);
 }
 
 void loop() {
   uint32_t now = millis();
-  if (s_ledOffMs && now >= s_ledOffMs) {
-    digitalWrite(LED_PIN, HIGH);
-    s_ledOffMs = 0;
-  }
 
-  // Front Button [M5]: toggle screen backlight
+  // Front Button [M5]: Toggle ON / OFF
   static bool prevA = true;
   bool curA = digitalRead(BTN_A_PIN);
   if (!curA && prevA) {
-    s_screenOn = !s_screenOn;
-    axpScreenPower(s_screenOn);
+    s_active = !s_active;
+    s_stealth = false;
+    s_modeChangeMs = now;
+    setScreenPower(true);
+    if (s_active) {
+      radiosStart();
+      sendPacket(now);
+    } else {
+      radiosStop();
+    }
+    s_needDraw = true;
   }
   prevA = curA;
 
-  // Side Button [B]: immediate ping
+  // Side Button [B]: While ON, toggle screen backlight (stealth battery saver)
   static bool prevB = true;
   bool curB = digitalRead(BTN_B_PIN);
-  if (!curB && prevB) {
-    sendPacket(now);
+  if (!curB && prevB && s_active) {
+    s_stealth = !s_stealth;
+    setScreenPower(!s_stealth);
+    if (!s_stealth) s_needDraw = true;
   }
   prevB = curB;
 
-  if (now - s_txMs >= 600) {
-    s_txMs = now;
-    sendPacket(now);
+  if (s_active) {
+    // Transmit every 1.2s (halves radio TX energy while keeping smooth 3D Locator updates)
+    if (now - s_txMs >= 1200) {
+      s_txMs = now;
+      sendPacket(now);
+    }
+    // Redraw minimal screen only once every 5s
+    if (s_needDraw || (s_lcdAwake && now - s_drawMs >= 5000)) {
+      s_needDraw = false;
+      s_drawMs = now;
+      drawMinimal(now);
+    }
+    delay(40);
+  } else {
+    // OFF mode: draw "OFF" once, then after 6 seconds turn screen hardware completely OFF
+    if (s_needDraw) {
+      s_needDraw = false;
+      drawMinimal(now);
+    }
+    if (s_lcdAwake && now - s_modeChangeMs > 6000) {
+      setScreenPower(false);
+    }
+    delay(100);
   }
-  if (now - s_drawMs >= 120) {
-    s_drawMs = now;
-    drawHud(now);
-  }
-  delay(10);
 }
