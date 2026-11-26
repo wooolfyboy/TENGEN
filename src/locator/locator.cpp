@@ -59,8 +59,10 @@ struct EarRaw {
 struct LocNode {
   uint32_t id;
   bool     has1, has2;
-  int      r1, r2;         // r2 is after antenna offset calibration
-  int      r2Raw;
+  float    r1F, r2F;       // Kalman-filtered sub-decibel RSSI (r2F includes antenna offset)
+  float    r1Var, r2Var;   // 1D Kalman variance
+  int      r1, r2;         // rounded integer dBm for display
+  float    r2RawF;
   float    x, z, err;      // smoothed meters: Stick #1 at (-D/2, 0), Stick #2 at (+D/2, 0), room z > 0
   uint8_t  rawType;
   char     type[16];
@@ -119,10 +121,39 @@ static void savePrefs() {
   }
 }
 
-// Convert RSSI (dBm) to approximate indoor meters (path-loss exponent n = 2.2, 1m ref = -58 dBm)
-static float rssiToMeters(float rssi) {
-  float d = powf(10.0f, (-58.0f - rssi) / (10.0f * 2.2f));
-  return constrain(d, 0.25f, 14.0f);
+// Per-device-class 1m reference RSSI (watches/trackers/earbuds transmit quieter than laptops/phones)
+static float txRefForType(uint8_t rawType) {
+  switch (rawType) {
+    case T_COMPUTER:
+    case T_TV:      return -53.5f;
+    case T_PHONE:   return -58.0f;
+    case T_AUDIO:   return -60.5f;
+    case T_WATCH:   return -63.0f;
+    case T_TRACKER: return -62.5f;
+    default:        return -58.5f;
+  }
+}
+
+// Convert sub-dB RSSI to indoor meters using device-class TX power & path-loss exponent n = 2.25
+static float rssiToMeters(float rssi, uint8_t rawType = 0) {
+  float ref = txRefForType(rawType);
+  float d = powf(10.0f, (ref - rssi) / (10.0f * 2.25f));
+  return constrain(d, 0.20f, 14.0f);
+}
+
+// 1D Anti-Multipath Kalman update: rejects single-channel destructive fade drops (>7 dB dip)
+// while tracking line-of-sight upper envelope smoothly with sub-dB precision.
+static void kalmanRssi(float& est, float& var, float meas) {
+  if (var <= 0.0f) { est = meas; var = 4.0f; return; }
+  float diff = meas - est;
+  // Multipath reflections off walls cause sudden destructive drops on 1 of the 3 BLE channels:
+  // assign high measurement noise R to sudden deep dips, low R to clean line-of-sight peaks.
+  float Q = 0.45f;
+  float R = (diff < -7.0f) ? 18.0f : (diff < -2.5f) ? 6.5f : 2.2f;
+  var += Q;
+  float K = var / (var + R);
+  est += K * diff;
+  var = (1.0f - K) * var;
 }
 
 // ESP-NOW receive callback (runs in Wi-Fi task)
@@ -151,8 +182,11 @@ static void onEspNowRecv(const esp_now_recv_info_t* info, const uint8_t* data, i
       if (memcmp(s_earRaw[k].mac, e.mac, 6) == 0) { idx = k; break; }
     }
     if (idx >= 0) {
-      s_earRaw[idx].rssiS = s_earRaw[idx].rssiS * 0.65f + (float)e.rssi * 0.35f;
-      s_earRaw[idx].type = e.type;
+      // Peak-biased smoothing on Ear #2 raw packets to reject 3-channel multipath dips
+      float m = (float)e.rssi;
+      float alpha = (m >= s_earRaw[idx].rssiS) ? 0.45f : (m < s_earRaw[idx].rssiS - 7.0f ? 0.12f : 0.25f);
+      s_earRaw[idx].rssiS += (m - s_earRaw[idx].rssiS) * alpha;
+      if (e.type) s_earRaw[idx].type = e.type;
       s_earRaw[idx].seenMs = now;
     } else if (s_nEarRaw < MAX_EAR_RAW) {
       EarRaw& nr = s_earRaw[s_nEarRaw++];
@@ -208,9 +242,11 @@ static void locStart() {
     esp_wifi_scan_stop();
     s_ownWifi = false;
   }
+  esp_wifi_set_ps(WIFI_PS_NONE);          // zero Wi-Fi sleep latency for incoming ESP-NOW packets
+  esp_wifi_set_max_tx_power(78);          // max 19.5 dBm radio power on T-Embed
   initEspNow();
   bleRadioOn();
-  bleLowDuty(true);   // share antenna smoothly between BLE scan and ESP-NOW / AP
+  bleLocatorBoost(true);                  // boost T-Embed BLE scan duty cycle & +9 dBm gain!
   s_on = true;
 }
 
@@ -218,6 +254,7 @@ static void locStop() {
   if (!s_on) return;
   crumb("loc stop");
   stopEspNow();
+  bleLocatorBoost(false);
   if (s_ownWifi) {
     WiFi.mode(WIFI_OFF);
     bleLowDuty(false);
@@ -250,11 +287,12 @@ int   locGetOffset() { loadPrefs(); return s_offsetDb; }
 // and sets s_offsetDb so both sticks report equal signal for a centered phone.
 bool locCalibrate(String& out) {
   loadPrefs();
-  int bestIdx = -1, bestScore = -999;
+  int bestIdx = -1;
+  float bestScore = -999.0f;
   for (int i = 0; i < s_nNodes; i++) {
     const LocNode& n = s_nodes[i];
     if (!n.has1 || !n.has2) continue;
-    int score = n.r1 + n.r2Raw;
+    float score = n.r1F + n.r2RawF;
     if (score > bestScore) { bestScore = score; bestIdx = i; }
   }
   if (bestIdx < 0) {
@@ -264,7 +302,7 @@ bool locCalibrate(String& out) {
     return false;
   }
   const LocNode& b = s_nodes[bestIdx];
-  s_offsetDb = constrain(b.r1 - b.r2Raw, -20, 25);
+  s_offsetDb = constrain((int)lroundf(b.r1F - b.r2RawF), -20, 25);
   savePrefs();
   snprintf(s_calMsg, sizeof(s_calMsg), L("CAL OK: %+d dB", "КАЛИБРОВКА: %+d дБ"), s_offsetDb);
   s_calToastMs = millis();
@@ -274,7 +312,7 @@ bool locCalibrate(String& out) {
   return true;
 }
 
-// Recompute 2D room positions at 5 Hz
+// Recompute 2D room positions at 5 Hz using sub-dB Kalman RSSI + Hyperbolic Least-Squares solver
 static void recomputeNodes(uint32_t now) {
   if (!s_locLock || xSemaphoreTake(s_locLock, pdMS_TO_TICKS(15)) != pdTRUE) return;
   // 1. Prune stale Ear #2 entries (> 12 s)
@@ -284,33 +322,30 @@ static void recomputeNodes(uint32_t now) {
   }
   s_nEarRaw = w;
 
-  // Map Ear #2 MACs to T-Embed entity IDs (or synthetic ear-only IDs 0x80000000 | hash)
-  struct EarMatch { uint32_t id; int r2Raw; uint8_t type; uint8_t mac[6]; bool matched; };
+  struct EarMatch { uint32_t id; float r2RawF; uint8_t type; uint8_t mac[6]; bool matched; };
   EarMatch matches[MAX_EAR_RAW];
   int nMatches = 0;
   for (int i = 0; i < s_nEarRaw; i++) {
     uint32_t entId = 0;
     bool m = bleMatchMac(s_earRaw[i].mac, entId);
     if (!m) {
-      // Ear-only device (heard in far corner by Stick #2, out of T-Embed range)
       uint32_t h = 2166136261u;
       for (int b = 0; b < 6; b++) h = (h ^ s_earRaw[i].mac[b]) * 16777619u;
       entId = 0x80000000u | (h & 0x7FFFFFFFu);
     }
-    matches[nMatches++] = { entId, (int)roundf(s_earRaw[i].rssiS), s_earRaw[i].type,
+    matches[nMatches++] = { entId, s_earRaw[i].rssiS, s_earRaw[i].type,
       { s_earRaw[i].mac[0], s_earRaw[i].mac[1], s_earRaw[i].mac[2], s_earRaw[i].mac[3], s_earRaw[i].mac[4], s_earRaw[i].mac[5] }, m };
   }
   xSemaphoreGive(s_locLock);
 
-  // 2. Mark all existing nodes unseen for this pass
   struct SeenCtx {
     uint32_t now;
     EarMatch* matches;
     int nMatches;
   } ctx = { now, matches, nMatches };
 
-  // Update from T-Embed's active BLE entities
-  bleForEachEnt([](uint32_t id, int rssi, uint8_t rawType, const char* typeStr, const char* vendor, const char* name, const char* label, void* vctx) {
+  // 2. Update from T-Embed's full BLE scanner table (sub-dB precision)
+  bleForEachEnt([](uint32_t id, float rssiF, uint8_t rawType, const char* typeStr, const char* vendor, const char* name, const char* label, void* vctx) {
     SeenCtx* c = (SeenCtx*)vctx;
     int idx = -1;
     for (int i = 0; i < s_nNodes; i++) if (s_nodes[i].id == id) { idx = i; break; }
@@ -325,7 +360,8 @@ static void recomputeNodes(uint32_t now) {
     }
     LocNode& n = s_nodes[idx];
     n.has1 = true;
-    n.r1 = rssi;
+    kalmanRssi(n.r1F, n.r1Var, rssiF);
+    n.r1 = (int)lroundf(n.r1F);
     n.rawType = rawType;
     strlcpy(n.type, typeStr ? typeStr : "device", sizeof(n.type));
     strlcpy(n.vendor, vendor ? vendor : "", sizeof(n.vendor));
@@ -333,14 +369,15 @@ static void recomputeNodes(uint32_t now) {
     strlcpy(n.label, label ? label : "", sizeof(n.label));
     n.seenMs = c->now;
 
-    // Check if Ear #2 also hears this entity
     n.has2 = false;
     for (int k = 0; k < c->nMatches; k++) {
       if (c->matches[k].id == id) {
         n.has2 = true;
-        n.r2Raw = c->matches[k].r2Raw;
-        n.r2 = constrain(n.r2Raw + s_offsetDb, -105, -25);
-        c->matches[k].id = 0; // consumed
+        n.r2RawF = c->matches[k].r2RawF;
+        float calR2 = constrain(n.r2RawF + (float)s_offsetDb, -105.0f, -25.0f);
+        kalmanRssi(n.r2F, n.r2Var, calR2);
+        n.r2 = (int)lroundf(n.r2F);
+        c->matches[k].id = 0;
         break;
       }
     }
@@ -364,15 +401,17 @@ static void recomputeNodes(uint32_t now) {
     LocNode& n = s_nodes[idx];
     n.has1 = false;
     n.has2 = true;
-    n.r2Raw = matches[k].r2Raw;
-    n.r2 = constrain(n.r2Raw + s_offsetDb, -105, -25);
+    n.r2RawF = matches[k].r2RawF;
+    float calR2 = constrain(n.r2RawF + (float)s_offsetDb, -105.0f, -25.0f);
+    kalmanRssi(n.r2F, n.r2Var, calR2);
+    n.r2 = (int)lroundf(n.r2F);
     n.rawType = matches[k].type;
     strlcpy(n.type, typeName(matches[k].type), sizeof(n.type));
     snprintf(n.name, sizeof(n.name), "EAR %02X:%02X", matches[k].mac[5], matches[k].mac[4]);
     n.seenMs = now;
   }
 
-  // 4. Prune nodes not seen this frame and update 2D trilateration coordinates
+  // 4. Hyperbolic + Regularized Least-Squares 2D Trilateration
   int nw = 0;
   uint16_t matched = 0;
   const float D = max(1.0f, s_baseM);
@@ -382,46 +421,95 @@ static void recomputeNodes(uint32_t now) {
     LocNode& n = s_nodes[i];
     if (n.seenMs != now) continue;
     float tx, tz, terr;
+    // Tiny deterministic phase from ID prevents two independent devices from collapsing to identical floats
+    float idPhase = ((n.id * 2654435761u) % 1000) / 1000.0f;
+
     if (n.has1 && n.has2) {
       matched++;
-      float d1 = rssiToMeters((float)n.r1);
-      float d2 = rssiToMeters((float)n.r2);
-      // Law of cosines from Stick #1 (-D/2, 0) and Stick #2 (+D/2, 0)
-      tx = (d1 * d1 - d2 * d2) / (2.0f * D);
-      tx = constrain(tx, -halfD * 1.45f, halfD * 1.45f);
+      float d1 = rssiToMeters(n.r1F, n.rawType);
+      float d2 = rssiToMeters(n.r2F, n.rawType);
+
+      // Regularize non-closing triangles while preserving exact Apollonius distance ratio d1/d2:
+      // Case A: d1 + d2 < D * 1.04 (both sticks hear louder than baseline separation)
+      float sumD = d1 + d2;
+      float resid = 0.0f;
+      if (sumD < D * 1.04f) {
+        resid = (D * 1.04f - sumD);
+        float scale = (D * 1.04f) / max(0.2f, sumD);
+        d1 *= scale;
+        d2 *= scale;
+      }
+      // Case B: |d1 - d2| > D * 0.94 (one circle inside the other -> hyperbolic bearing asymptote)
+      float diffD = d1 - d2;
+      if (fabsf(diffD) > D * 0.94f) {
+        resid += fabsf(diffD) - D * 0.94f;
+        float mid = 0.5f * (d1 + d2);
+        float capped = (diffD > 0 ? 1.0f : -1.0f) * D * 0.94f;
+        d1 = mid + 0.5f * capped;
+        d2 = mid - 0.5f * capped;
+      }
+
+      // Blend exact intersection with hyperbolic bearing sin(theta) = tanh((r2 - r1) / 11.5)
+      float xTri = (d1 * d1 - d2 * d2) / (2.0f * D);
+      float rMean = sqrtf(d1 * d2);
+      float sinTh = tanhf((n.r2F - n.r1F) / 11.5f);
+      float xHyp = sinTh * max(halfD, rMean * 0.85f);
+      tx = xTri * 0.65f + xHyp * 0.35f + (idPhase - 0.5f) * 0.08f;
+      tx = constrain(tx, -D * 1.35f, D * 1.35f);
+
       float dx1 = tx + halfD, dx2 = tx - halfD;
-      float z1Sq = d1 * d1 - dx1 * dx1;
-      float z2Sq = d2 * d2 - dx2 * dx2;
-      float zSq = 0.5f * (max(0.08f, z1Sq) + max(0.08f, z2Sq));
-      tz = constrain(sqrtf(zSq), 0.25f, D * 2.2f);
-      // Confidence circle radius grows with distance & triangle residual
-      float gap = fabsf(d1 + d2 - D);
-      terr = constrain(0.35f + 0.18f * (d1 + d2) + (d1 + d2 < D ? (D - d1 - d2) * 0.4f : gap * 0.05f), 0.35f, 3.2f);
+      float z1 = sqrtf(max(0.09f, d1 * d1 - dx1 * dx1));
+      float z2 = sqrtf(max(0.09f, d2 * d2 - dx2 * dx2));
+      // Weight z toward the closer stick (whose distance curve has steeper dB/m slope)
+      float w1 = 1.0f / (0.3f + d1), w2 = 1.0f / (0.3f + d2);
+      tz = (z1 * w1 + z2 * w2) / (w1 + w2) + (idPhase - 0.5f) * 0.06f;
+      tz = constrain(tz, 0.25f, D * 2.4f);
+
+      terr = constrain(0.28f + 0.14f * rMean + resid * 0.25f, 0.28f, 2.6f);
     } else if (n.has1) {
-      float d1 = rssiToMeters((float)n.r1);
-      float ang = ((n.id * 2654435761u) % 1000) / 1000.0f * 2.2f - 1.3f; // biased toward Stick #1 side
-      tx = -halfD + sinf(ang) * d1 * 0.65f;
-      tz = constrain(cosf(ang * 0.6f) * d1, 0.3f, D * 2.0f);
-      terr = constrain(0.6f + d1 * 0.35f, 0.6f, 3.8f);
+      float d1 = rssiToMeters(n.r1F, n.rawType);
+      float ang = idPhase * 2.1f - 1.25f;
+      tx = -halfD + sinf(ang) * d1 * 0.68f;
+      tz = constrain(cosf(ang * 0.6f) * d1, 0.3f, D * 2.1f);
+      terr = constrain(0.55f + d1 * 0.3f, 0.55f, 3.2f);
     } else {
-      float d2 = rssiToMeters((float)n.r2);
-      float ang = ((n.id * 2654435761u) % 1000) / 1000.0f * 2.2f - 0.9f; // biased toward Stick #2 side
-      tx = halfD + sinf(ang) * d2 * 0.65f;
-      tz = constrain(cosf(ang * 0.6f) * d2, 0.3f, D * 2.0f);
-      terr = constrain(0.6f + d2 * 0.35f, 0.6f, 3.8f);
+      float d2 = rssiToMeters(n.r2F, n.rawType);
+      float ang = idPhase * 2.1f - 0.85f;
+      tx = halfD + sinf(ang) * d2 * 0.68f;
+      tz = constrain(cosf(ang * 0.6f) * d2, 0.3f, D * 2.1f);
+      terr = constrain(0.55f + d2 * 0.3f, 0.55f, 3.2f);
     }
-    n.x += (tx - n.x) * 0.28f;
-    n.z += (tz - n.z) * 0.28f;
+    n.x += (tx - n.x) * 0.30f;
+    n.z += (tz - n.z) * 0.30f;
     n.err += (terr - n.err) * 0.25f;
     s_nodes[nw++] = n;
   }
   s_nNodes = nw;
   s_matchedCnt = matched;
 
+  // 5. Elastic 2D De-Clustering Pass: gently separate co-located devices (e.g. phone + watch on same desk)
+  const float minSep = constrain(D * 0.11f, 0.22f, 0.45f);
+  for (int pass = 0; pass < 2; pass++) {
+    for (int i = 0; i < s_nNodes; i++) {
+      for (int j = i + 1; j < s_nNodes; j++) {
+        float dx = s_nodes[j].x - s_nodes[i].x;
+        float dz = s_nodes[j].z - s_nodes[i].z;
+        float dist = hypotf(dx, dz);
+        if (dist < minSep) {
+          float push = (minSep - dist) * 0.38f;
+          float ang = (dist > 0.005f) ? atan2f(dz, dx) : ((i * 7 + j * 13) % 12) * 0.5236f;
+          float px = cosf(ang) * push, pz = sinf(ang) * push;
+          s_nodes[i].x -= px; s_nodes[i].z = max(0.22f, s_nodes[i].z - pz);
+          s_nodes[j].x += px; s_nodes[j].z = max(0.22f, s_nodes[j].z + pz);
+        }
+      }
+    }
+  }
+
   // Sort: dual-locked devices first, then strongest signal
   std::sort(s_nodes, s_nodes + s_nNodes, [](const LocNode& a, const LocNode& b) {
-    int sa = (a.has1 && a.has2 ? 200 : 0) + max(a.has1 ? a.r1 : -110, a.has2 ? a.r2 : -110);
-    int sb = (b.has1 && b.has2 ? 200 : 0) + max(b.has1 ? b.r1 : -110, b.has2 ? b.r2 : -110);
+    float sa = (a.has1 && a.has2 ? 200.0f : 0.0f) + max(a.has1 ? a.r1F : -110.0f, a.has2 ? a.r2F : -110.0f);
+    float sb = (b.has1 && b.has2 ? 200.0f : 0.0f) + max(b.has1 ? b.r1F : -110.0f, b.has2 ? b.r2F : -110.0f);
     return sa > sb;
   });
 }

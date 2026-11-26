@@ -676,9 +676,63 @@ bool bleMatchMac(const uint8_t mac[6], uint32_t& outEntId) {
   return found;
 }
 
+void bleLocatorBoost(bool on) {
+  NimBLEDevice::setPower(ESP_PWR_LVL_P9); // max +9 dBm RF gain/power
+  NimBLEScan* s = NimBLEDevice::getScan();
+  bool was = g_bleActive;
+  if (was) s->stop();
+  s->setActiveScan(true);
+  if (on) {
+    s->setInterval(64);   // 40 ms interval
+    s->setWindow(52);     // 32.5 ms window (~81% BLE duty cycle while leaving room for Ch 6 ESP-NOW!)
+  } else {
+    s->setInterval(100);
+    s->setWindow(45);
+  }
+  if (was && !s->start(0, false)) g_bleActive = false;
+}
+
+// For Locator 2x: iterates over ALL active physical entities in g_seen (down to -102 dBm,
+// bypassing Settings > Range cutoff and 4 dB display deadband, with sub-dB precision).
 void bleForEachEnt(BleEntCb cb, void* ctx) {
-  for (const auto& kv : g_ents) {
-    const Ent& e = kv.second;
-    cb(kv.first, e.rssi, e.type, typeName(e.type), vendorLabel(e.cat, e.vkind, e.vcode), e.name, e.label, ctx);
+  labelsLoad();
+  struct Agg {
+    uint32_t t;
+    float    rssiSum;
+    float    weightSum;
+    int8_t   peakRssi;
+    uint8_t  cat, type, vkind, vscore;
+    uint16_t vcode;
+    char     name[20];
+    char     label[21];
+  };
+  static std::map<uint32_t, Agg> locEnts;
+  locEnts.clear();
+  uint32_t now = millis();
+  if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(25)) == pdTRUE) {
+    for (const auto& kv : g_seen) {
+      const Dev& d = kv.second;
+      if (msSince(now, d.t) > 15000 || d.rssiS < -102) continue;
+      Agg& a = locEnts[d.ent];
+      float ageS = msSince(now, d.t) / 1000.0f;
+      float w = 1.0f / (1.0f + ageS * 0.4f);
+      // Blend raw rssi, smoothed rssiS, and rmax to preserve sub-dB resolution
+      float rSub = d.rssiS * 0.65f + d.rssi * 0.25f + d.rmax * 0.10f;
+      a.rssiSum += rSub * w;
+      a.weightSum += w;
+      if (a.t == 0 || d.rssi > a.peakRssi) a.peakRssi = d.rssi;
+      if (d.t >= a.t) a.t = d.t;
+      if (d.type != T_UNKNOWN) a.type = d.type;
+      if (d.vscore > a.vscore) { a.cat = d.cat; a.vkind = d.vkind; a.vcode = d.vcode; a.vscore = d.vscore; }
+      if (d.name[0] && !a.name[0]) memcpy(a.name, d.name, sizeof(a.name));
+      if (g_nLabels > 0 && !a.label[0]) { const char* l = labelFor(d.mac); if (l) strlcpy(a.label, l, sizeof(a.label)); }
+    }
+    xSemaphoreGive(g_lock);
+  }
+  for (const auto& kv : locEnts) {
+    const Agg& a = kv.second;
+    if (a.weightSum <= 0) continue;
+    float rF = a.rssiSum / a.weightSum;
+    cb(kv.first, rF, a.type, typeName(a.type), vendorLabel(a.cat, a.vkind, a.vcode), a.name, a.label, ctx);
   }
 }

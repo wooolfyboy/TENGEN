@@ -225,7 +225,8 @@ T.hqLoc = {
     }
 
     items.sort((a, b) => b.p[3] - a.p[3]);
-    const topDual = new Set(items.slice().sort((a, b) => b.prio - a.prio).slice(0, 8));
+    const topDual = new Set(items.slice().sort((a, b) => b.prio - a.prio).slice(0, 10));
+    const labelBoxes = [];
 
     // 5. Render Triangulation Lasers, Confidence Circles, Trails & Nodes
     for (const it of items) {
@@ -235,13 +236,13 @@ T.hqLoc = {
 
       // Dual-laser triangulation lock lines on the floor + confidence circle
       if (it.both && (topDual.has(it) || isSel)) {
-        g.strokeStyle = isSel ? cHot : cLine + '0.32)';
-        g.lineWidth = isSel ? 1.6 : 1.0;
+        g.strokeStyle = isSel ? cHot : cLine + '0.24)';
+        g.lineWidth = isSel ? 1.6 : 0.9;
         g.beginPath();
         g.moveTo(pSt1[0], pSt1[1]); g.lineTo(bx, by);
         g.moveTo(pSt2[0], pSt2[1]); g.lineTo(bx, by);
         g.stroke();
-        drawCircle3D(it.x, it.z, it.err3d, 28, isSel ? cHot : cLine + '0.38)', isSel ? 1.6 : 1.0);
+        drawCircle3D(it.x, it.z, it.err3d * (isSel ? 1.0 : 0.65), 28, isSel ? cHot : cLine + '0.25)', isSel ? 1.6 : 0.9);
       } else if (!it.both && isSel) {
         const pSrc = (it.mask & 1) ? pSt1 : pSt2;
         g.strokeStyle = cLine + '0.35)'; g.lineWidth = 1;
@@ -277,9 +278,26 @@ T.hqLoc = {
         g.beginPath(); g.arc(sx, sy, rr, t * 2, t * 2 + Math.PI * 1.5); g.stroke();
       }
 
+      // Smart anti-overlap label placement
       if (topDual.has(it) || isSel) {
         const dTxt = it.both ? ` (${it.rx >= 0 ? '+' : ''}${Number(it.rx).toFixed(1)}m, ${Number(it.rz).toFixed(1)}m)` : '';
-        T.txt(g, T.fit(g, it.label, u * 11) + dTxt, sx + rad + 5, sy + 3, Math.max(10, u * 0.72), isSel ? cHot : it.col, 'm', 'left');
+        const fullTxt = T.fit(g, it.label, u * 11) + dTxt;
+        const fpx = Math.max(10, u * 0.72);
+        const tw = fullTxt.length * fpx * 0.58;
+        let lx = sx + rad + 6, ly = sy + 3;
+        // Shift label vertically if another label occupies this screen rectangle
+        for (let step = 0; step < 5; step++) {
+          const candY = ly + (step === 0 ? 0 : (step % 2 ? -1 : 1) * Math.ceil(step / 2) * (fpx + 3));
+          const hit = labelBoxes.some(b => lx < b.x + b.w && lx + tw > b.x && candY - fpx < b.y && candY > b.y - b.h);
+          if (!hit || isSel) { ly = candY; break; }
+        }
+        labelBoxes.push({ x: lx, y: ly, w: tw, h: fpx + 2 });
+        if (Math.abs(ly - (sy + 3)) > 4) {
+          g.strokeStyle = it.col; g.globalAlpha = 0.4; g.lineWidth = 0.8;
+          g.beginPath(); g.moveTo(sx + rad, sy); g.lineTo(lx - 2, ly - fpx * 0.3); g.stroke();
+          g.globalAlpha = 1;
+        }
+        T.txt(g, fullTxt, lx, ly, fpx, isSel ? cHot : it.col, 'm', 'left');
       }
       T.hits.circle(sx, sy, Math.max(15, rad * 2.3), { node: it });
     }
