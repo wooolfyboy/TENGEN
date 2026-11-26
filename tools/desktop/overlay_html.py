@@ -47,7 +47,7 @@ body.kurenai .card.alert .side b{color:#0b0b0b}body.kurenai .card.alert .kj{colo
 </style></head><body class="denko"><div id="stack"></div><script>
 var MAX=3,DUR=4500,S=document.getElementById('stack');
 function api(){return window.pywebview&&window.pywebview.api}
-function report(){var a=api();var h=S.children.length?S.getBoundingClientRect().height+4:0;if(a&&a.popup_size)a.popup_size(Math.ceil(h))}
+function report(){clearTimeout(window.__rt);window.__rt=setTimeout(function(){var a=api();var h=S.children.length?S.getBoundingClientRect().height+4:0;if(a&&a.popup_size)a.popup_size(Math.ceil(h))},10)}
 var SEAL={new:'接近',tracker:'追跡',ir:'赤外',nfc:'近接',sensor:'感知',temp:'外気',battery:'電池',link:'通信'};
 window.P={
  style:function(s){document.body.className=s||'denko'},

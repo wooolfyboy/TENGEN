@@ -142,10 +142,11 @@ class _PopupApi:
         self._o = owner
 
     def popup_size(self, h):
-        self._o._size(int(h or 0))
+        # Run off the WebView2 COM callback stack so WinForms Form.Invoke never recurses
+        threading.Thread(target=self._o._size, args=(int(h or 0),), daemon=True).start()
 
     def popup_click(self):
-        self._o.app.show_main()
+        threading.Thread(target=self._o.app.show_main, daemon=True).start()
 
 
 class Popups:
@@ -155,6 +156,7 @@ class Popups:
         self.ready = False
         self.pending = []
         self.visible = False
+        self._last_h = -1
         self.lock = threading.Lock()
         # Windows: park the window off-screen instead of hiding it; WebView2 never rendered in a window created
         # hidden (blank grey card). Show = move into place, hide = move back out.
@@ -186,6 +188,9 @@ class Popups:
             log("popup:", e)
 
     def _size(self, h):
+        if h == self._last_h:
+            return
+        self._last_h = h
         if h <= 0:
             if self.visible:
                 self.visible = False
