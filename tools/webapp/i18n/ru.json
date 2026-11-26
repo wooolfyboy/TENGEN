@@ -448,5 +448,20 @@
  "Tools": "Инструменты",
  "433 MHz": "433 МГц",
  "AUDIO": "ЗВУК",
- "RESET": "СБРОС"
+ "RESET": "СБРОС",
+ "Locator 3D": "Локатор 3D",
+ "LOCATOR 3D (2 STICKS)": "ЛОКАТОР 3D (2 ПАЛКИ)",
+ "EAR #2 ONLINE": "УХО #2 НА СВЯЗИ",
+ "TURN ON M5STICKC PLUS (EAR #2) — CONNECTS AUTOMATICALLY ON CH 6": "ВКЛЮЧИ M5STICKC PLUS (УХО #2) — ПОДКЛЮЧИТСЯ САМА НА 6 КАНАЛЕ",
+ "WAITING...": "ОЖИДАНИЕ...",
+ "BASE": "БАЗА",
+ "m": "м",
+ "CALIBRATE": "КАЛИБРОВКА",
+ "CALIBRATING...": "КАЛИБРУЮ...",
+ "CALIBRATED": "ОТКАЛИБРОВАНО",
+ "NEED PHONE HEARD BY BOTH STICKS": "НУЖЕН ТЕЛЕФОН, КОТОРЫЙ СЛЫШАТ ОБЕ ПАЛКИ",
+ "LOCKED 2X": "ПЕЛЕНГ 2X",
+ "OFFSET": "ПОПРАВКА",
+ "OFS": "ПОПР",
+ "HEARD BY 1 STICK ONLY": "СЛЫШИТ ТОЛЬКО ОДНА ПАЛКА"
 }

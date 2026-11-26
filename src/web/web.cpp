@@ -41,6 +41,7 @@
 #include "core/leds.h"
 #include "probe/ir.h"
 #include "probe/nfc.h"
+#include "locator/locator.h"
 #include "link/serout.h"
 #include <mbedtls/base64.h>
 
@@ -57,8 +58,8 @@ static int        s_qrN = 0;
 static int        s_netCount = 0;
 static uint32_t   s_subMs = 0, s_sndMs = 0;     // last time the Sub-GHz / Sound tabs were polled
 static bool       s_subOn = false, s_sndOn = false;
-static uint32_t   s_irMs = 0, s_nfcMs = 0;      // IR receiver and NFC for the tablet (while subscribed)
-static bool       s_irOn = false, s_nfcOn = false;
+static uint32_t   s_irMs = 0, s_nfcMs = 0, s_locMs = 0;      // IR, NFC and Locator 2x for the tablet (while subscribed)
+static bool       s_irOn = false, s_nfcOn = false, s_locOn = false;
 static const char* s_tab = "";
 static int8_t      s_bleWanted = -1;            // last webTick decision for Bluetooth (-1: recompute)
 
@@ -293,7 +294,7 @@ static void otaDone() {
 static uint32_t s_sseBytes = 0;                  // total sent to tablets (link screen)
 struct SseCli {
   NetworkClient c;
-  bool on = false, ble = false, wifi = false, snd = false, sub = false, pc = false, wx = false, ir = false, nfc = false, satSent = false;
+  bool on = false, ble = false, wifi = false, snd = false, sub = false, pc = false, wx = false, ir = false, nfc = false, loc = false, satSent = false;
   int8_t sm = 0, sb = 1;                         // Sub-GHz mode and band
   bool sens = false;                             // 433 MHz sensors (sensors.h)
   uint32_t tSens = 0, sensSeen = 0;
@@ -301,7 +302,7 @@ struct SseCli {
   bool usb = false;                              // this "tablet" is the PC app over USB (link)
   uint32_t seenMs = 0;                           // USB: last sign of life from the PC
   String wantQ;                                  // USB: subscriptions (want=... string)
-  uint32_t tSt = 0, tBle = 0, tSnd = 0, tSub = 0, tPc = 0, tWx = 0, wifiSeen = 0, irSeen = 0, nfcSeen = 0;
+  uint32_t tSt = 0, tBle = 0, tSnd = 0, tSub = 0, tPc = 0, tWx = 0, tLoc = 0, wifiSeen = 0, irSeen = 0, nfcSeen = 0;
 };
 static NetworkServer* s_sseSrv = nullptr;
 static SseCli s_sse[SSE_MAX];
@@ -336,7 +337,7 @@ static void parseWant(SseCli& k, const String& req) {
   int q = req.indexOf("want="); String want = q >= 0 ? req.substring(q + 5, req.indexOf(' ', q)) : String("ble,wifi");
   k.ble = want.indexOf("ble") >= 0; k.wifi = want.indexOf("wifi") >= 0; k.snd = want.indexOf("snd") >= 0;
   k.sub = want.indexOf("sub") >= 0; k.pc = want.indexOf("pc") >= 0; k.wx = want.indexOf("wx") >= 0;
-  k.ir = want.indexOf("ir") >= 0; k.nfc = want.indexOf("nfc") >= 0;
+  k.ir = want.indexOf("ir") >= 0; k.nfc = want.indexOf("nfc") >= 0; k.loc = want.indexOf("loc") >= 0;
   k.irSeen = g_ir.gen; k.nfcSeen = g_nfc.gen;     // do not replay old taps and cards, only new ones
   auto qInt = [&](const char* key, int def) { int p = req.indexOf(key); return p >= 0 ? req.substring(p + strlen(key)).toInt() : def; };
   k.sens = want.indexOf("sens") >= 0;
@@ -386,7 +387,7 @@ static void sseAccept() {
 // what the tablets need now (to switch off unneeded radios)
 static int sseClients(bool& ble, bool& wifi, bool& snd, int& subM, int& subB, bool& wx) {
   int n = 0; ble = wifi = snd = wx = false; subM = -1; subB = 1;
-  for (auto& k : s_sse) if (k.on) { n++; ble |= k.ble; wifi |= k.wifi; snd |= k.snd; wx |= k.wx; if (k.sub) { subM = k.sm; subB = k.sb; } }
+  for (auto& k : s_sse) if (k.on) { n++; ble |= (k.ble || k.loc); wifi |= k.wifi; snd |= k.snd; wx |= k.wx; if (k.sub) { subM = k.sm; subB = k.sb; } }
   return n;
 }
 
@@ -437,6 +438,7 @@ static void sseTick(uint32_t now) {
     }
     if (k.ir && k.irSeen != g_ir.gen) { k.irSeen = g_ir.gen; String o; o.reserve(512); irJson(o); sseEvent(k, "ir", o, false); }
     if (k.nfc && k.nfcSeen != g_nfc.gen) { k.nfcSeen = g_nfc.gen; String o; o.reserve(384); nfcJson(o); sseEvent(k, "nfc", o, false); }
+    if (k.loc && now - k.tLoc >= 250) { k.tLoc = now; o = ""; locJson(o); sseEvent(k, "loc", o, true); }
   }
 }
 
@@ -484,7 +486,7 @@ struct QueryArgs : ApiArgs {
 };
 
 static const char* const API_PATHS[] = {
-  "/api/ble", "/api/bledev", "/api/wifi", "/api/sub", "/api/sens", "/api/snd", "/api/pagever", "/api/settings",
+  "/api/ble", "/api/bledev", "/api/wifi", "/api/sub", "/api/sens", "/api/snd", "/api/loc2x", "/api/pagever", "/api/settings",
   "/api/set", "/api/label", "/api/act", "/api/pckey", "/api/loc", "/api/info", "/api/ver",
 };
 
@@ -510,6 +512,14 @@ static bool apiHandle(const char* path, const ApiArgs& A, String& o) {
     sensJson(o, millis()); return true;
   }
   if (is("/api/snd")) { s_sndMs = millis(); s_sndOn = audioWebUse(); audioJson(o); return true; }
+  if (is("/api/loc2x")) {
+    s_locMs = millis();
+    s_locOn = locWebUse();
+    if (A.get("a") == "cal") { locCalibrate(o); return true; }
+    if (A.has("base")) locSetBase(A.get("base").toFloat());
+    locJson(o);
+    return true;
+  }
   // tablet app version: the app compares it and fetches /full if the device has a newer one
   if (is("/api/pagever")) { o = "{\"sha\":\""; o += TABLET_HTML_SHA; o += "\",\"gz\":"; o += TABLET_GZ_LEN; o += '}'; return true; }
   // tablet as a remote: device settings, device labels, actions
@@ -655,6 +665,7 @@ static void webStop() {
   if (s_sndOn) { audioWebStop(); s_sndOn = false; }
   if (s_irOn) { irStop(); s_irOn = false; }
   if (s_nfcOn) { nfcStop(); s_nfcOn = false; }
+  if (s_locOn) { locWebStop(); s_locOn = false; }
   s_nNets = 0; s_netCount = 0; s_scanned = false;
   s_wifiJson = "{\"scanned\":false,\"nets\":[]}";
   s_on = false;
@@ -698,13 +709,18 @@ static void webTick(uint32_t now) {
   uint32_t t = millis();
   if (s_subOn) { if ((int32_t)(t - s_subMs) > 4000) { subWebStop(); s_subOn = false; } else subWebTick(t); }
   if (s_sndOn) { if ((int32_t)(t - s_sndMs) > 4000) { audioWebStop(); s_sndOn = false; } else audioWebTick(t); }
-  // IR and NFC: run while a tablet is subscribed (+4 s), then sleep
-  bool sIr = false, sNfc = false;
-  for (auto& k : s_sse) if (k.on) { sIr |= k.ir; sNfc |= k.nfc; }
+  // IR, NFC and Locator 2x: run while a tablet is subscribed (+4 s), then sleep
+  bool sIr = false, sNfc = false, sLoc = false;
+  for (auto& k : s_sse) if (k.on) { sIr |= k.ir; sNfc |= k.nfc; sLoc |= k.loc; }
   if (sIr)  { s_irMs = t;  if (!s_irOn)  { irStart();  s_irOn = true; } }
   if (sNfc) { s_nfcMs = t; if (!s_nfcOn) { nfcStart(); s_nfcOn = true; } }
-  if (s_irOn)  { if ((int32_t)(t - s_irMs) > 4000)  { irStop();  s_irOn = false; }  else { crumb("web ir");  irTick(t); } }
-  if (s_nfcOn) { if ((int32_t)(t - s_nfcMs) > 4000) { nfcStop(); s_nfcOn = false; } else { crumb("web nfc"); nfcTick(t); } }
+  if (sLoc) { s_locMs = t; if (!s_locOn) { s_locOn = locWebUse(); } }
+  if (s_irOn)  { if ((int32_t)(t - s_irMs) > 4000)  { irStop();     s_irOn = false; }  else { crumb("web ir");  irTick(t); } }
+  if (s_nfcOn) { if ((int32_t)(t - s_nfcMs) > 4000) { nfcStop();    s_nfcOn = false; } else { crumb("web nfc"); nfcTick(t); } }
+  if (s_locOn) {
+    if ((int32_t)(t - s_locMs) > 4000) { locWebStop(); s_locOn = false; }
+    else { crumb("web loc"); locTick(t); wantScan = false; } // pause 13-ch Wi-Fi hopping so Channel 6 ESP-NOW has 0% loss
+  }
   if (s_ok && wantScan && now - s_scanMs > SCAN_STEP_MS && WiFi.scanComplete() != WIFI_SCAN_RUNNING) {   // one channel at a time so the AP does not vanish
     s_scanMs = now;
     WiFi.scanNetworks(true, true, false, 90, s_scanCh);   // async, 90 ms per channel

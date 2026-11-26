@@ -189,6 +189,8 @@ S.onSt = d => {
   const prev = S.st; S.st = d;
   if (prev && prev.bat >= 0 && d.bat >= 0 && prev.bat > 15 && d.bat <= 15) S.event('PWR', 'battery ' + d.bat + '%', true);
 };
+S.loc = null; S.locT = 0;
+S.onLoc = d => { S.loc = d; S.locT = performance.now(); };
 // every frame: anything that arrives in jumps eases smoothly
 S.tick = dt => {
   if (S.wx) { const k = T.ease(dt, 1.4); for (const key in S.wxs) { const v = +S.wx[key] || 0; S.wxs[key] += (v - S.wxs[key]) * k; } }

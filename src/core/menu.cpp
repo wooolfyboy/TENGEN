@@ -23,6 +23,7 @@
 #include "audio/audio.h"
 #include "probe/ir.h"
 #include "probe/nfc.h"
+#include "locator/locator.h"
 
 // combined IR · NFC section so the main menu stays compact
 static int s_probeScr = 0;
@@ -65,8 +66,8 @@ static const Section probeSection = {
 
 // card order in the main menu (most-used 5 fit on the first screen without scrolling)
 static const Section* const SECTIONS[] = {
-  &bleSection, &wifiSection, &webSection, &pcSection, &gallerySection,
-  &subghzSection, &soundSection, &probeSection, &settingsSection
+  &bleSection, &locatorSection, &wifiSection, &webSection, &pcSection,
+  &gallerySection, &subghzSection, &soundSection, &probeSection, &settingsSection
 };
 static const int N_SECTIONS = sizeof(SECTIONS) / sizeof(SECTIONS[0]);
 

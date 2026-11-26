@@ -7,7 +7,7 @@ T.desktop = !!window.TENGEN_DESKTOP;
 const H = {
   st: d => { S.onSt(d); T.app && T.app.status(); },
   ble: d => S.onBle(d), wifi: d => S.onWifi(d), snd: d => S.onSnd(d), sub: d => S.onSub(d), pc: d => S.onPc(d),
-  sat: d => S.onSat(d), wx: d => S.onWx(d), ir: d => S.onIr(d), nfc: d => S.onNfc(d), sens: d => S.onSens(d),
+  sat: d => S.onSat(d), wx: d => S.onWx(d), ir: d => S.onIr(d), nfc: d => S.onNfc(d), sens: d => S.onSens(d), loc: d => S.onLoc(d),
 };
 if (USB) {
   // /api/... requests also go over the cable (plain fetch, the page does not notice)
@@ -78,6 +78,7 @@ Stream.poll = (want) => {
         const m = /sm=(\d+)/.exec(want), b = /sb=(\d+)/.exec(want);
         S.onSub(await J('/api/sub?m=' + (m ? m[1] : 0) + '&b=' + (b ? b[1] : 1)));
       }
+      if (has('loc') && n % 2 === 1) S.onLoc(await J('/api/loc2x'));
       if (n % 16 === 1) { const i = await J('/api/info'); S.onSt({ name: 'TENGEN', up: i.up, bat: i.bat.ok ? i.bat.soc : -1, usb: i.bat.usb ? 1 : 0, cli: i.cli }); T.app.status(); }
       Stream.lastMsg = performance.now();
     } catch (e) { Stream.setLink('off'); }

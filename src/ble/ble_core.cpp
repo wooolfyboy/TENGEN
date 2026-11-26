@@ -658,3 +658,27 @@ void bleStreamJson(String& o) {
   }
   o += "]}";
 }
+
+bool bleMatchMac(const uint8_t mac[6], uint32_t& outEntId) {
+  bool found = false;
+  uint32_t bestT = 0;
+  if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(15)) == pdTRUE) {
+    for (const auto& kv : g_seen) {
+      const Dev& d = kv.second;
+      if (memcmp(d.mac, mac, 6) == 0 && (!found || d.t >= bestT)) {
+        outEntId = d.ent;
+        bestT = d.t;
+        found = true;
+      }
+    }
+    xSemaphoreGive(g_lock);
+  }
+  return found;
+}
+
+void bleForEachEnt(BleEntCb cb, void* ctx) {
+  for (const auto& kv : g_ents) {
+    const Ent& e = kv.second;
+    cb(kv.first, e.rssi, e.type, typeName(e.type), vendorLabel(e.cat, e.vkind, e.vcode), e.name, e.label, ctx);
+  }
+}

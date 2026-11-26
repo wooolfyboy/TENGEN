@@ -67,7 +67,7 @@ const A = T.auto = {
     if (T.app && T.app.cur && T.app.cur.cv) T.app.cur.cv.fit();
     if (this._el) this._el.hidden = true;
     const hq = T.views.find(v => v.id === 'hq');
-    if (hq && hq.sub === 2) hq.sub = 0;
+    if (hq && hq.sub === 3) hq.sub = 0;
     if (T.app && T.app.cur && T.app.cur.id === 'hq') T.app.renderSubs();
   },
 
