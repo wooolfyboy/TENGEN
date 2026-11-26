@@ -1,10 +1,12 @@
 // ---- HQ > LOCATOR 3D: Dedicated 2-Stick Stereo BLE Triangulation Scene ----
 // Activates conflict-free Locator mode on T-Embed (locks Channel 6 ESP-NOW + fast BLE).
 // Renders TENGEN #1 and M5StickC Plus EAR #2 in 3D room space with dual-laser locks,
-// confidence circles, motion trails, baseline distance adjustment, and 1-tap calibration.
+// silky critically-damped motion, live movement radar highlights, filter modes (ALL / 2X / NEAR),
+// device naming right from the 3D scene, baseline distance adjustment, and 1-tap calibration.
 (() => {
-const TRAIL_MAX = 14;
+const TRAIL_MAX = 16;
 const rssiToM = r => Math.max(0.25, Math.min(14, Math.pow(10, (-58 - r) / 22)));
+const FILTERS = ['ALL', '2X ONLY', 'NEAR'];
 
 T.hqLoc = {
   init(hq) {
@@ -13,7 +15,8 @@ T.hqLoc = {
     this.drag = T.drag(hq.cv.cv, this.cam, { minPitch: 0.28, maxPitch: 1.42 });
     this.dust = T.dust(140, 1.9, 1.2);
     this.sel = null;
-    this.pos = new Map();
+    this.filterIdx = 0;          // 0 = ALL, 1 = 2X ONLY, 2 = NEAR (<2.5m)
+    this.pos = new Map();        // key -> { x, y, z, vx, vz, rx, rz, err, ly, speed, seen }
     this.trails = new Map();
     this.trailTick = 0;
     this.resetAnim = 0;
@@ -27,7 +30,9 @@ T.hqLoc = {
       if (!h) { this.sel = null; return; }
       if (h.act === 'base') { this.changeBase(h.d); return; }
       if (h.act === 'cal')  { this.calibrate(); return; }
+      if (h.act === 'flt')  { this.filterIdx = (this.filterIdx + 1) % FILTERS.length; return; }
       if (h.act === 'rst')  { this.resetAnim = 1.0; this.sel = null; return; }
+      if (h.act === 'name' && this.sel) { this.promptName(this.sel); return; }
       if (h.node)           { this.sel = h.node; return; }
       this.sel = null;
     };
@@ -37,6 +42,10 @@ T.hqLoc = {
     this.toastMsg = msg;
     this.toastBad = bad;
     this.toastT = 2.8;
+  },
+
+  promptName(node) {
+    if (T.nameDevice) T.nameDevice(node, node.rawLabel || '');
   },
 
   changeBase(delta) {
@@ -78,12 +87,12 @@ T.hqLoc = {
     this.drag.tick(dt);
     if (this.resetAnim > 0) {
       this.resetAnim = Math.max(0, this.resetAnim - dt * 2.2);
-      const k = T.ease(dt, 0.14);
+      const k = T.ease(dt, 0.18);
       this.cam.yaw += (0.0 - this.cam.yaw) * k;
       this.cam.pitch += (0.88 - this.cam.pitch) * k;
       this.cam.D += (3.25 - this.cam.D) * k;
     } else if (this.drag.idle()) {
-      this.cam.yaw += Math.sin(t * 0.22) * dt * 0.08;
+      this.cam.yaw += Math.sin(t * 0.18) * dt * 0.05;
     }
     this.dust.tick(dt);
     T.hits.clear();
@@ -96,7 +105,6 @@ T.hqLoc = {
     const L = S.loc || { on: 1, base: 3.0, ofs: 6, ear: { ok: 0, bat: 0, rssi: -70 }, matched: 0, d: [] };
     const baseM = Math.max(1.0, +L.base || 3.0);
     const earOk = !!(L.ear && L.ear.ok);
-    // Map physical room meters to 3D scene units: baseline sits at z0 = -0.55, room extends to +z
     const sc = 1.55 / baseM;
     const zWall = -0.58;
     const x1 = -baseM * 0.5 * sc, x2 = baseM * 0.5 * sc;
@@ -126,17 +134,15 @@ T.hqLoc = {
     }
     g.stroke();
 
-    // Meter labels along depth axis
     for (let zm = 1; zm <= Math.min(6, gridD); zm++) {
       const pm = this.cam.p(-gridW * sc - 0.12, 0, zWall + zm * sc);
       T.txt(g, zm + 'm', pm[0], pm[1], Math.max(9, u * 0.62), cDim, 'm', 'right');
     }
 
-    // Concentric range rings around Stick #1 and Stick #2
     for (let k = 1; k <= 3; k++) {
       const rm = (baseM * 0.45 * k) * sc;
-      drawCircle3D(x1, zWall, rm, 48, cLine + (k === 2 ? '0.24)' : '0.13)'), 1);
-      drawCircle3D(x2, zWall, rm, 48, earOk ? cAltA + (k === 2 ? '0.24)' : '0.13)') : cLine + '0.07)', 1);
+      drawCircle3D(x1, zWall, rm, 48, cLine + (k === 2 ? '0.22)' : '0.12)'), 1);
+      drawCircle3D(x2, zWall, rm, 48, earOk ? cAltA + (k === 2 ? '0.22)' : '0.12)') : cLine + '0.07)', 1);
     }
 
     // 2. Baseline Link Beam between TENGEN #1 and M5StickC Plus EAR #2
@@ -149,13 +155,12 @@ T.hqLoc = {
     g.setLineDash([]);
 
     if (earOk) {
-      // Animated ESP-NOW data pulses flying from EAR #2 -> TENGEN #1
       for (let k = 0; k < 3; k++) {
-        const f = (t * 0.85 + k / 3) % 1;
+        const f = (t * 0.75 + k / 3) % 1;
         const px = x2 + (x1 - x2) * f;
-        const pp = this.cam.p(px, 0.06 + Math.sin(f * Math.PI) * 0.08, zWall);
+        const pp = this.cam.p(px, 0.06 + Math.sin(f * Math.PI) * 0.07, zWall);
         g.fillStyle = cHot;
-        g.beginPath(); g.arc(pp[0], pp[1], 3.0, 0, T.TAU); g.fill();
+        g.beginPath(); g.arc(pp[0], pp[1], 2.8, 0, T.TAU); g.fill();
       }
     }
     const pMid = this.cam.p(0, 0.02, zWall - 0.12);
@@ -163,7 +168,7 @@ T.hqLoc = {
 
     // 3. Draw Beacons: TENGEN #1 (left) and M5StickC Plus EAR #2 (right)
     const drawBeacon = (bx, bz, col, title, sub) => {
-      const h = 0.22 + Math.sin(t * 2.2 + bx) * 0.02;
+      const h = 0.22 + Math.sin(t * 2.0 + bx) * 0.018;
       const pb = this.cam.p(bx, 0, bz), pt = this.cam.p(bx, h, bz);
       drawCircle3D(bx, bz, 0.14, 24, col, 1.5);
       g.strokeStyle = col; g.lineWidth = 2;
@@ -177,56 +182,108 @@ T.hqLoc = {
     drawBeacon(x2, zWall, earOk ? cAlt : cDim, 'M5 EAR #2',
       earOk ? `BAT ${L.ear.bat}% · ${L.ear.rssi} dBm` : T.tr('WAITING...'));
 
-    // 4. Process & Smooth Triangulated Devices
+    // 4. Process & Silky-Smooth Triangulated Devices (tau = 1.25s + movement radar)
     this.trailTick += dt;
-    const sampleTrail = this.trailTick >= 0.1;
+    const sampleTrail = this.trailTick >= 0.12;
     if (sampleTrail) this.trailTick = 0;
-    const smoothK = T.ease(dt, 0.22);
+    const smoothK = T.ease(dt, 1.25);      // 1.25s time constant -> zero stepping between packets
+    const readK   = T.ease(dt, 1.6);       // even calmer readout numbers
     const activeKeys = new Set();
     const items = [];
+    let n1 = 0, n2 = 0, nBoth = 0, nMoving = 0;
 
     for (const row of (L.d || [])) {
-      // [id, mask(1=stick1,2=stick2,3=both), r1, r2, x, z, err, type, vendor, name, label]
-      const [id, mask, r1, r2, rx, rz, rerr, type, vend, name, label] = row;
+      const [id, mask, r1, r2, rx, rz, rerr, type, vend, name, rawLabel] = row;
+      if (mask & 1) n1++;
+      if (mask & 2) n2++;
+      const both = (mask & 3) === 3;
+      if (both) nBoth++;
+
+      // Apply view filter: 0 = ALL, 1 = 2X ONLY, 2 = NEAR (<2.5m)
+      if (this.filterIdx === 1 && !both) continue;
+      if (this.filterIdx === 2 && Math.hypot(rx, rz) > 2.6) continue;
+
       const key = String(id);
       activeKeys.add(key);
       const tx = rx * sc, tz = zWall + rz * sc, ty = 0.16 + T.pct(Math.max(r1, r2)) * 0.28;
       let sp = this.pos.get(key);
-      if (!sp) { sp = [tx, ty, tz]; this.pos.set(key, sp); }
-      else {
-        sp[0] += (tx - sp[0]) * smoothK;
-        sp[1] += (ty - sp[1]) * smoothK;
-        sp[2] += (tz - sp[2]) * smoothK;
+      if (!sp) {
+        sp = { x: tx, y: ty, z: tz, rx, rz, err: rerr, speed: 0, ly: null };
+        this.pos.set(key, sp);
+      } else {
+        const prevX = sp.rx, prevZ = sp.rz;
+        sp.x += (tx - sp.x) * smoothK;
+        sp.y += (ty - sp.y) * smoothK;
+        sp.z += (tz - sp.z) * smoothK;
+        sp.rx += (rx - sp.rx) * readK;
+        sp.rz += (rz - sp.rz) * readK;
+        sp.err += (rerr - sp.err) * readK;
+        // Estimate real-world movement speed (m/s)
+        const instVel = dt > 0.001 ? Math.hypot(sp.rx - prevX, sp.rz - prevZ) / dt : 0;
+        sp.speed = sp.speed * 0.92 + instVel * 0.08;
       }
+
       if (sampleTrail) {
         let tr = this.trails.get(key);
         if (!tr) { tr = []; this.trails.set(key, tr); }
         const last = tr[tr.length - 1];
-        if (!last || Math.hypot(sp[0] - last[0], sp[2] - last[2]) > 0.012) {
-          tr.push([sp[0], sp[1], sp[2]]);
+        if (!last || Math.hypot(sp.x - last[0], sp.z - last[2]) > 0.015) {
+          tr.push([sp.x, sp.y, sp.z]);
           if (tr.length > TRAIL_MAX) tr.shift();
         } else if (tr.length > 1) tr.shift();
       }
-      const both = (mask & 3) === 3;
+
+      const moving = both && sp.speed > 0.18;
+      if (moving) nMoving++;
       const trk = type === 'tracker';
-      const col = trk ? cAlt : both ? cGrn : (mask & 1) ? cAcc : cHot;
+      const localLbl = S.labels && S.labels.get(id);
+      const effLabel = (localLbl ? localLbl.n : rawLabel) || '';
+      const col = trk ? cAlt : moving ? cHot : both ? cGrn : (mask & 1) ? cAcc : cDim;
+
       items.push({
-        id, key, mask, both, r1, r2, rx, rz, rerr,
-        x: sp[0], y: sp[1], z: sp[2], err3d: Math.max(0.08, rerr * sc * 0.45),
-        type, vend, name, label: label || name || vend || type || 'BLE',
+        id, key, mask, both, moving, speed: sp.speed, r1, r2,
+        rx: sp.rx, rz: sp.rz, rerr: sp.err,
+        x: sp.x, y: sp.y, z: sp.z, err3d: Math.max(0.07, sp.err * sc * 0.42),
+        sp, type, vend, name, rawLabel: effLabel,
+        label: effLabel || name || vend || type || 'BLE',
         col, alert: trk,
-        p: this.cam.p(sp[0], sp[1], sp[2]),
-        pb: this.cam.p(sp[0], 0, sp[2]),
-        prio: (both ? 100 : 0) + (trk ? 80 : 0) + Math.max(r1, r2),
+        p: this.cam.p(sp.x, sp.y, sp.z),
+        pb: this.cam.p(sp.x, 0, sp.z),
+        prio: (both ? 100 : 0) + (trk ? 80 : 0) + (moving ? 50 : 0) + Math.max(r1, r2),
       });
     }
     if (sampleTrail) {
       for (const k of this.pos.keys()) if (!activeKeys.has(k)) { this.pos.delete(k); this.trails.delete(k); }
     }
 
-    items.sort((a, b) => b.p[3] - a.p[3]);
+    // Compute stable anti-overlap label Y offsets sorted by deterministic ID so labels never swap!
     const topDual = new Set(items.slice().sort((a, b) => b.prio - a.prio).slice(0, 10));
+    const labeledList = items.filter(it => topDual.has(it) || (this.sel && this.sel.id === it.id))
+                             .sort((a, b) => a.id - b.id);
     const labelBoxes = [];
+    const fpx = Math.max(10, u * 0.72);
+    const lySmooth = T.ease(dt, 0.25);
+
+    for (const it of labeledList) {
+      const [sx, sy, scP] = it.p;
+      const rad = Math.max(3.5, Math.min(11, scP * 0.012 * (it.both ? 1.25 : 0.95)));
+      const dTxt = it.both ? ` (${it.rx >= 0 ? '+' : ''}${it.rx.toFixed(1)}m, ${it.rz.toFixed(1)}m)` : '';
+      it.fullTxt = T.fit(g, it.label, u * 11) + dTxt;
+      const tw = it.fullTxt.length * fpx * 0.58;
+      const lx = sx + rad + 6;
+      let targetLy = sy + 3;
+      for (let step = 0; step < 6; step++) {
+        const candY = (sy + 3) + (step === 0 ? 0 : (step % 2 ? -1 : 1) * Math.ceil(step / 2) * (fpx + 4));
+        const hit = labelBoxes.some(b => lx < b.x + b.w && lx + tw > b.x && Math.abs(candY - b.y) < fpx + 2);
+        if (!hit) { targetLy = candY; break; }
+      }
+      if (it.sp.ly == null) it.sp.ly = targetLy;
+      else it.sp.ly += (targetLy - it.sp.ly) * lySmooth;
+      labelBoxes.push({ x: lx, y: targetLy, w: tw, h: fpx + 2 });
+    }
+
+    // Depth-sort back-to-front for 3D rendering
+    items.sort((a, b) => b.p[3] - a.p[3]);
 
     // 5. Render Triangulation Lasers, Confidence Circles, Trails & Nodes
     for (const it of items) {
@@ -234,19 +291,24 @@ T.hqLoc = {
       const [sx, sy, scP] = it.p, [bx, by] = it.pb;
       const rad = Math.max(3.5, Math.min(11, scP * 0.012 * (it.both ? 1.25 : 0.95)));
 
-      // Dual-laser triangulation lock lines on the floor + confidence circle
       if (it.both && (topDual.has(it) || isSel)) {
-        g.strokeStyle = isSel ? cHot : cLine + '0.24)';
-        g.lineWidth = isSel ? 1.6 : 0.9;
+        g.strokeStyle = isSel ? cHot : cLine + '0.20)';
+        g.lineWidth = isSel ? 1.6 : 0.85;
         g.beginPath();
         g.moveTo(pSt1[0], pSt1[1]); g.lineTo(bx, by);
         g.moveTo(pSt2[0], pSt2[1]); g.lineTo(bx, by);
         g.stroke();
-        drawCircle3D(it.x, it.z, it.err3d * (isSel ? 1.0 : 0.65), 28, isSel ? cHot : cLine + '0.25)', isSel ? 1.6 : 0.9);
+        drawCircle3D(it.x, it.z, it.err3d * (isSel ? 1.0 : 0.55), 28, isSel ? cHot : cLine + '0.22)', isSel ? 1.6 : 0.85);
       } else if (!it.both && isSel) {
         const pSrc = (it.mask & 1) ? pSt1 : pSt2;
         g.strokeStyle = cLine + '0.35)'; g.lineWidth = 1;
         g.beginPath(); g.moveTo(pSrc[0], pSrc[1]); g.lineTo(bx, by); g.stroke();
+      }
+
+      // Motion ripple on floor when device is actively moving
+      if (it.moving) {
+        const mr = 0.08 + ((t * 0.9) % 1) * 0.22;
+        drawCircle3D(it.x, it.z, mr, 24, cAltA + (0.65 * (1 - ((t * 0.9) % 1))).toFixed(2) + ')', 1.3);
       }
 
       // Motion trail
@@ -273,39 +335,29 @@ T.hqLoc = {
       g.fillStyle = it.col;
       g.beginPath(); g.arc(sx, sy, rad, 0, T.TAU); g.fill();
       if (it.both || isSel) {
-        const rr = rad * (isSel ? 2.4 : 1.9);
-        g.strokeStyle = isSel ? cHot : it.col; g.lineWidth = isSel ? 1.8 : 1.2;
-        g.beginPath(); g.arc(sx, sy, rr, t * 2, t * 2 + Math.PI * 1.5); g.stroke();
+        const rr = rad * (isSel ? 2.4 : 1.85);
+        g.strokeStyle = isSel ? cHot : it.moving ? cAlt : it.col;
+        g.lineWidth = isSel ? 1.8 : 1.2;
+        g.beginPath(); g.arc(sx, sy, rr, t * 1.6, t * 1.6 + Math.PI * 1.5); g.stroke();
       }
 
-      // Smart anti-overlap label placement
-      if (topDual.has(it) || isSel) {
-        const dTxt = it.both ? ` (${it.rx >= 0 ? '+' : ''}${Number(it.rx).toFixed(1)}m, ${Number(it.rz).toFixed(1)}m)` : '';
-        const fullTxt = T.fit(g, it.label, u * 11) + dTxt;
-        const fpx = Math.max(10, u * 0.72);
-        const tw = fullTxt.length * fpx * 0.58;
-        let lx = sx + rad + 6, ly = sy + 3;
-        // Shift label vertically if another label occupies this screen rectangle
-        for (let step = 0; step < 5; step++) {
-          const candY = ly + (step === 0 ? 0 : (step % 2 ? -1 : 1) * Math.ceil(step / 2) * (fpx + 3));
-          const hit = labelBoxes.some(b => lx < b.x + b.w && lx + tw > b.x && candY - fpx < b.y && candY > b.y - b.h);
-          if (!hit || isSel) { ly = candY; break; }
-        }
-        labelBoxes.push({ x: lx, y: ly, w: tw, h: fpx + 2 });
+      if (it.fullTxt) {
+        const lx = sx + rad + 6, ly = it.sp.ly != null ? it.sp.ly : sy + 3;
         if (Math.abs(ly - (sy + 3)) > 4) {
-          g.strokeStyle = it.col; g.globalAlpha = 0.4; g.lineWidth = 0.8;
+          g.strokeStyle = it.col; g.globalAlpha = 0.42; g.lineWidth = 0.8;
           g.beginPath(); g.moveTo(sx + rad, sy); g.lineTo(lx - 2, ly - fpx * 0.3); g.stroke();
           g.globalAlpha = 1;
         }
-        T.txt(g, fullTxt, lx, ly, fpx, isSel ? cHot : it.col, 'm', 'left');
+        T.txt(g, it.fullTxt, lx, ly, fpx, isSel ? cHot : it.col, 'm', 'left');
       }
       T.hits.circle(sx, sy, Math.max(15, rad * 2.3), { node: it });
+      if (isSel) this.sel = it; // keep selected ref fresh
     }
 
     this.dust.draw(g, this.cam);
     T.bloom(this.hq.cv, 0.55);
 
-    // 6. Tactical HUD & Interactive Calibration Bar
+    // 6. Tactical HUD & Interactive Controls
     const pad = u * 1.1;
     T.txt(g, '天眼 · ' + T.tr('LOCATOR 3D (2 STICKS)'), pad, pad + u * 1.2, u * 1.45, cHot, 't', 'left');
     const earSub = earOk
@@ -313,19 +365,20 @@ T.hqLoc = {
       : T.tr('TURN ON M5STICKC PLUS (EAR #2) — CONNECTS AUTOMATICALLY ON CH 6');
     T.txt(g, earSub, pad, pad + u * 2.5, u * 0.72, earOk ? cGrn : cAlt, 'm', 'left');
 
-    // Top-right controls: [ - ] BASE 3.0m [ + ] | [ 🎯 CALIBRATE ] | [ ⌖ ]
+    // Top-right controls: [ FILTER ] | [ - ] BASE 3.0m [ + ] | [ 🎯 CALIBRATE ] | [ ⌖ ]
     const bh = u * 1.95, gap = u * 0.4, py0 = pad + u * 0.25;
-    const wMinus = u * 2.2, wBase = u * 7.2, wPlus = u * 2.2, wCal = u * 10.5, wRst = u * 2.2;
-    let px0 = W - pad - (wMinus + wBase + wPlus + wCal + wRst + gap * 4);
+    const wFlt = u * 7.4, wMinus = u * 2.2, wBase = u * 7.2, wPlus = u * 2.2, wCal = u * 10.2, wRst = u * 2.2;
+    let px0 = W - pad - (wFlt + wMinus + wBase + wPlus + wCal + wRst + gap * 5);
 
     const drawBtn = (w, txt, col, hit, fill = false) => {
       g.fillStyle = fill ? (kur ? 'rgba(229,38,47,.22)' : 'rgba(62,230,255,.16)') : 'rgba(8,14,20,.68)';
       g.strokeStyle = col; g.lineWidth = 1.1;
       g.fillRect(px0, py0, w, bh); g.strokeRect(px0, py0, w, bh);
-      T.txt(g, txt, px0 + w / 2, py0 + bh * 0.7, u * 0.72, cHot, 'm', 'center');
+      T.txt(g, txt, px0 + w / 2, py0 + bh * 0.7, u * 0.70, cHot, 'm', 'center');
       if (hit) T.hits.rect(px0, py0 - 4, w, bh + 8, hit);
       px0 += w + gap;
     };
+    drawBtn(wFlt, '◈ ' + T.tr(FILTERS[this.filterIdx]), this.filterIdx ? cGrn : cLine + '0.45)', { act: 'flt' }, this.filterIdx > 0);
     drawBtn(wMinus, '−', cLine + '0.45)', { act: 'base', d: -0.5 });
     drawBtn(wBase, `${T.tr('BASE')} ${baseM.toFixed(1)}${T.tr('m')}`, cLine + '0.35)', null);
     drawBtn(wPlus, '+', cLine + '0.45)', { act: 'base', d: 0.5 });
@@ -334,14 +387,11 @@ T.hqLoc = {
 
     // Bottom-left telemetry tiles
     const sy0 = H - pad - u * 3.8;
-    const n1 = items.filter(x => x.mask & 1).length;
-    const n2 = items.filter(x => x.mask & 2).length;
-    const nBoth = items.filter(x => x.both).length;
     const stats = [
       [T.tr('LOCKED 2X'), nBoth, cGrn],
       ['TENGEN #1', n1, cAcc],
       ['M5 EAR #2', earOk ? n2 : 'OFF', earOk ? cAlt : cDim],
-      [T.tr('OFFSET'), (L.ofs >= 0 ? '+' : '') + L.ofs + ' dB', cHot],
+      [T.tr('MOVING'), nMoving, nMoving ? cAlt : cHot],
     ];
     stats.forEach(([k, v, col], i) => {
       const bx = pad + i * u * 7.8;
@@ -361,21 +411,31 @@ T.hqLoc = {
       T.txt(g, this.toastMsg, W / 2, by + th * 0.68, u * 0.95, cHot, 't', 'center');
     }
 
-    // Selected device details card (bottom-right)
+    // Selected device details card (bottom-right) with quick rename button
     if (this.sel) {
       const s = this.sel;
-      const cw = Math.min(W * 0.44, u * 22), ch = u * 6.4, cx0 = W - pad - cw, cy0 = H - pad - ch;
+      const cw = Math.min(W * 0.44, u * 23), ch = u * 7.2, cx0 = W - pad - cw, cy0 = H - pad - ch;
       g.fillStyle = kur ? 'rgba(14,14,14,.92)' : 'rgba(6,16,24,.9)';
       g.strokeStyle = s.both ? cGrn : cAcc; g.lineWidth = 1.5;
       g.fillRect(cx0, cy0, cw, ch); g.strokeRect(cx0, cy0, cw, ch);
-      T.txt(g, T.fit(g, s.label, cw - u * 1.4), cx0 + u * 0.7, cy0 + u * 1.65, u * 1.15, cHot, 't', 'left');
+      T.txt(g, T.fit(g, s.label, cw - u * 7.5), cx0 + u * 0.7, cy0 + u * 1.65, u * 1.15, cHot, 't', 'left');
+
+      // Quick Rename button (top-right of card)
+      const nbW = u * 6.0, nbH = u * 1.65, nbX = cx0 + cw - nbW - u * 0.6, nbY = cy0 + u * 0.5;
+      g.fillStyle = cLine + '0.18)'; g.strokeStyle = cAcc; g.lineWidth = 1;
+      g.fillRect(nbX, nbY, nbW, nbH); g.strokeRect(nbX, nbY, nbW, nbH);
+      T.txt(g, '✎ ' + T.tr('NAME'), nbX + nbW / 2, nbY + nbH * 0.72, u * 0.66, cHot, 'm', 'center');
+      T.hits.rect(nbX, nbY - 4, nbW, nbH + 8, { act: 'name' });
+
       const d1 = (s.mask & 1) ? rssiToM(s.r1).toFixed(1) + 'm (' + s.r1 + ' dBm)' : '—';
       const d2 = (s.mask & 2) ? rssiToM(s.r2).toFixed(1) + 'm (' + s.r2 + ' dBm)' : '—';
-      T.txt(g, `#1: ${d1}  ·  #2: ${d2}`, cx0 + u * 0.7, cy0 + u * 3.2, u * 0.72, cAcc, 'm', 'left');
+      T.txt(g, `#1: ${d1}  ·  #2: ${d2}`, cx0 + u * 0.7, cy0 + u * 3.35, u * 0.72, cAcc, 'm', 'left');
       const posStr = s.both
-        ? `X: ${s.rx >= 0 ? '+' : ''}${Number(s.rx).toFixed(1)}m · Z: ${Number(s.rz).toFixed(1)}m · ±${Number(s.rerr).toFixed(1)}m`
+        ? `X: ${s.rx >= 0 ? '+' : ''}${s.rx.toFixed(1)}m · Z: ${s.rz.toFixed(1)}m · ±${s.rerr.toFixed(1)}m`
         : T.tr('HEARD BY 1 STICK ONLY');
-      T.txt(g, posStr, cx0 + u * 0.7, cy0 + u * 4.8, u * 0.75, s.both ? cGrn : cDim, 'm', 'left');
+      T.txt(g, posStr, cx0 + u * 0.7, cy0 + u * 4.9, u * 0.75, s.both ? cGrn : cDim, 'm', 'left');
+      const stStr = s.moving ? '⚡ ' + T.tr('MOVING') : (s.vend || s.type || 'BLE').toUpperCase();
+      T.txt(g, stStr, cx0 + u * 0.7, cy0 + u * 6.35, u * 0.68, s.moving ? cAlt : cDim, 'm', 'left');
     }
   },
 };

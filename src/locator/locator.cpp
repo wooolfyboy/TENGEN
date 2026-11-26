@@ -59,11 +59,13 @@ struct EarRaw {
 struct LocNode {
   uint32_t id;
   bool     has1, has2;
+  uint32_t seen1Ms, seen2Ms;
   float    r1F, r2F;       // Kalman-filtered sub-decibel RSSI (r2F includes antenna offset)
   float    r1Var, r2Var;   // 1D Kalman variance
   int      r1, r2;         // rounded integer dBm for display
   float    r2RawF;
-  float    x, z, err;      // smoothed meters: Stick #1 at (-D/2, 0), Stick #2 at (+D/2, 0), room z > 0
+  float    targetX, targetZ; // deadband-stabilized target coordinates
+  float    x, z, err;        // smoothly gliding display coordinates (meters)
   uint8_t  rawType;
   char     type[16];
   char     vendor[24];
@@ -141,15 +143,13 @@ static float rssiToMeters(float rssi, uint8_t rawType = 0) {
   return constrain(d, 0.20f, 14.0f);
 }
 
-// 1D Anti-Multipath Kalman update: rejects single-channel destructive fade drops (>7 dB dip)
-// while tracking line-of-sight upper envelope smoothly with sub-dB precision.
+// 1D Anti-Multipath Kalman update: rejects single-channel destructive fade drops (>6 dB dip)
+// while gliding smoothly with sub-dB precision.
 static void kalmanRssi(float& est, float& var, float meas) {
-  if (var <= 0.0f) { est = meas; var = 4.0f; return; }
+  if (var <= 0.0f) { est = meas; var = 3.0f; return; }
   float diff = meas - est;
-  // Multipath reflections off walls cause sudden destructive drops on 1 of the 3 BLE channels:
-  // assign high measurement noise R to sudden deep dips, low R to clean line-of-sight peaks.
-  float Q = 0.45f;
-  float R = (diff < -7.0f) ? 18.0f : (diff < -2.5f) ? 6.5f : 2.2f;
+  float Q = 0.18f;
+  float R = (diff < -6.0f) ? 28.0f : (diff < -2.0f) ? 9.0f : 3.8f;
   var += Q;
   float K = var / (var + R);
   est += K * diff;
@@ -360,6 +360,7 @@ static void recomputeNodes(uint32_t now) {
     }
     LocNode& n = s_nodes[idx];
     n.has1 = true;
+    n.seen1Ms = c->now;
     kalmanRssi(n.r1F, n.r1Var, rssiF);
     n.r1 = (int)lroundf(n.r1F);
     n.rawType = rawType;
@@ -369,10 +370,10 @@ static void recomputeNodes(uint32_t now) {
     strlcpy(n.label, label ? label : "", sizeof(n.label));
     n.seenMs = c->now;
 
-    n.has2 = false;
     for (int k = 0; k < c->nMatches; k++) {
       if (c->matches[k].id == id) {
         n.has2 = true;
+        n.seen2Ms = c->now;
         n.r2RawF = c->matches[k].r2RawF;
         float calR2 = constrain(n.r2RawF + (float)s_offsetDb, -105.0f, -25.0f);
         kalmanRssi(n.r2F, n.r2Var, calR2);
@@ -381,6 +382,8 @@ static void recomputeNodes(uint32_t now) {
         break;
       }
     }
+    // Keep 2-stick lock alive across brief 1-packet dropouts (up to 6 s) so nodes never jump between modes
+    if (n.has2 && msSince(c->now, n.seen2Ms) > 6500) n.has2 = false;
   }, &ctx);
 
   // 3. Add remaining Ear-only devices (heard only by M5StickC Plus)
@@ -399,8 +402,9 @@ static void recomputeNodes(uint32_t now) {
       s_nodes[idx].err = 1.8f;
     }
     LocNode& n = s_nodes[idx];
-    n.has1 = false;
+    if (n.has1 && msSince(now, n.seen1Ms) > 6500) n.has1 = false;
     n.has2 = true;
+    n.seen2Ms = now;
     n.r2RawF = matches[k].r2RawF;
     float calR2 = constrain(n.r2RawF + (float)s_offsetDb, -105.0f, -25.0f);
     kalmanRssi(n.r2F, n.r2Var, calR2);
@@ -419,9 +423,19 @@ static void recomputeNodes(uint32_t now) {
 
   for (int i = 0; i < s_nNodes; i++) {
     LocNode& n = s_nodes[i];
-    if (n.seenMs != now) continue;
+    if (msSince(now, n.seenMs) > 4000) continue;
+    s_nodes[nw++] = n;
+  }
+  s_nNodes = nw;
+
+  // Sort deterministically by ID BEFORE computing target positions & de-clustering
+  // so two nearby nodes NEVER swap indices and oscillate around each other!
+  std::sort(s_nodes, s_nodes + s_nNodes, [](const LocNode& a, const LocNode& b) { return a.id < b.id; });
+
+  float rawTx[MAX_LOC_NODES], rawTz[MAX_LOC_NODES], rawErr[MAX_LOC_NODES];
+  for (int i = 0; i < s_nNodes; i++) {
+    LocNode& n = s_nodes[i];
     float tx, tz, terr;
-    // Tiny deterministic phase from ID prevents two independent devices from collapsing to identical floats
     float idPhase = ((n.id * 2654435761u) % 1000) / 1000.0f;
 
     if (n.has1 && n.has2) {
@@ -429,8 +443,6 @@ static void recomputeNodes(uint32_t now) {
       float d1 = rssiToMeters(n.r1F, n.rawType);
       float d2 = rssiToMeters(n.r2F, n.rawType);
 
-      // Regularize non-closing triangles while preserving exact Apollonius distance ratio d1/d2:
-      // Case A: d1 + d2 < D * 1.04 (both sticks hear louder than baseline separation)
       float sumD = d1 + d2;
       float resid = 0.0f;
       if (sumD < D * 1.04f) {
@@ -439,7 +451,6 @@ static void recomputeNodes(uint32_t now) {
         d1 *= scale;
         d2 *= scale;
       }
-      // Case B: |d1 - d2| > D * 0.94 (one circle inside the other -> hyperbolic bearing asymptote)
       float diffD = d1 - d2;
       if (fabsf(diffD) > D * 0.94f) {
         resid += fabsf(diffD) - D * 0.94f;
@@ -449,7 +460,6 @@ static void recomputeNodes(uint32_t now) {
         d2 = mid - 0.5f * capped;
       }
 
-      // Blend exact intersection with hyperbolic bearing sin(theta) = tanh((r2 - r1) / 11.5)
       float xTri = (d1 * d1 - d2 * d2) / (2.0f * D);
       float rMean = sqrtf(d1 * d2);
       float sinTh = tanhf((n.r2F - n.r1F) / 11.5f);
@@ -460,7 +470,6 @@ static void recomputeNodes(uint32_t now) {
       float dx1 = tx + halfD, dx2 = tx - halfD;
       float z1 = sqrtf(max(0.09f, d1 * d1 - dx1 * dx1));
       float z2 = sqrtf(max(0.09f, d2 * d2 - dx2 * dx2));
-      // Weight z toward the closer stick (whose distance curve has steeper dB/m slope)
       float w1 = 1.0f / (0.3f + d1), w2 = 1.0f / (0.3f + d2);
       tz = (z1 * w1 + z2 * w2) / (w1 + w2) + (idPhase - 0.5f) * 0.06f;
       tz = constrain(tz, 0.25f, D * 2.4f);
@@ -479,34 +488,57 @@ static void recomputeNodes(uint32_t now) {
       tz = constrain(cosf(ang * 0.6f) * d2, 0.3f, D * 2.1f);
       terr = constrain(0.55f + d2 * 0.3f, 0.55f, 3.2f);
     }
-    n.x += (tx - n.x) * 0.30f;
-    n.z += (tz - n.z) * 0.30f;
-    n.err += (terr - n.err) * 0.25f;
-    s_nodes[nw++] = n;
+    rawTx[i] = tx; rawTz[i] = tz; rawErr[i] = terr;
   }
-  s_nNodes = nw;
   s_matchedCnt = matched;
 
-  // 5. Elastic 2D De-Clustering Pass: gently separate co-located devices (e.g. phone + watch on same desk)
-  const float minSep = constrain(D * 0.11f, 0.22f, 0.45f);
+  // 5. Deterministic De-Clustering on target coordinates (before smoothing!)
+  const float minSep = constrain(D * 0.10f, 0.20f, 0.40f);
   for (int pass = 0; pass < 2; pass++) {
     for (int i = 0; i < s_nNodes; i++) {
       for (int j = i + 1; j < s_nNodes; j++) {
-        float dx = s_nodes[j].x - s_nodes[i].x;
-        float dz = s_nodes[j].z - s_nodes[i].z;
+        float dx = rawTx[j] - rawTx[i];
+        float dz = rawTz[j] - rawTz[i];
         float dist = hypotf(dx, dz);
         if (dist < minSep) {
-          float push = (minSep - dist) * 0.38f;
-          float ang = (dist > 0.005f) ? atan2f(dz, dx) : ((i * 7 + j * 13) % 12) * 0.5236f;
+          float push = (minSep - dist) * 0.42f;
+          // Angle derived deterministically from stable device IDs so it never flips
+          float ang = (dist > 0.02f) ? atan2f(dz, dx) : (((s_nodes[i].id ^ s_nodes[j].id) % 360) * 0.017453f);
           float px = cosf(ang) * push, pz = sinf(ang) * push;
-          s_nodes[i].x -= px; s_nodes[i].z = max(0.22f, s_nodes[i].z - pz);
-          s_nodes[j].x += px; s_nodes[j].z = max(0.22f, s_nodes[j].z + pz);
+          rawTx[i] -= px; rawTz[i] = max(0.22f, rawTz[i] - pz);
+          rawTx[j] += px; rawTz[j] = max(0.22f, rawTz[j] + pz);
         }
       }
     }
   }
 
-  // Sort: dual-locked devices first, then strongest signal
+  // 6. Apply spatial deadband hysteresis + calm exponential glide
+  const float deadbandM = constrain(D * 0.065f, 0.15f, 0.30f);
+  for (int i = 0; i < s_nNodes; i++) {
+    LocNode& n = s_nodes[i];
+    if (n.targetZ <= 0.01f) {
+      n.targetX = n.x = rawTx[i];
+      n.targetZ = n.z = rawTz[i];
+      n.err = rawErr[i];
+      continue;
+    }
+    float jump = hypotf(rawTx[i] - n.targetX, rawTz[i] - n.targetZ);
+    if (jump > deadbandM) {
+      // Smooth breakout beyond deadband
+      float kT = min(0.55f, (jump - deadbandM) / (deadbandM * 2.5f));
+      n.targetX += (rawTx[i] - n.targetX) * kT;
+      n.targetZ += (rawTz[i] - n.targetZ) * kT;
+    } else {
+      // Micro-creep (2%) inside deadband so stationary devices stay rock-solid
+      n.targetX += (rawTx[i] - n.targetX) * 0.02f;
+      n.targetZ += (rawTz[i] - n.targetZ) * 0.02f;
+    }
+    n.x += (n.targetX - n.x) * 0.15f;
+    n.z += (n.targetZ - n.z) * 0.15f;
+    n.err += (rawErr[i] - n.err) * 0.15f;
+  }
+
+  // Sort for display/output: dual-locked devices first, then strongest signal
   std::sort(s_nodes, s_nodes + s_nNodes, [](const LocNode& a, const LocNode& b) {
     float sa = (a.has1 && a.has2 ? 200.0f : 0.0f) + max(a.has1 ? a.r1F : -110.0f, a.has2 ? a.r2F : -110.0f);
     float sb = (b.has1 && b.has2 ? 200.0f : 0.0f) + max(b.has1 ? b.r1F : -110.0f, b.has2 ? b.r2F : -110.0f);

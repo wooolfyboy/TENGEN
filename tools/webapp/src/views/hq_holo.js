@@ -273,11 +273,11 @@ T.hqHolo = {
       });
     }
 
-    // Smooth positions & record motion trails at ~10 Hz
+    // Smooth positions & record motion trails at ~10 Hz (silky 1.1s time constant)
     this.trailTick += dt;
     const sampleTrail = this.trailTick >= 0.1;
     if (sampleTrail) this.trailTick = 0;
-    const smoothK = T.ease(dt, 0.22);
+    const smoothK = T.ease(dt, 1.1);
     const activeKeys = new Set();
     const items = [];
     for (const it of rawItems) {

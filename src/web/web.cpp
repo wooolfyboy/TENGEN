@@ -753,7 +753,7 @@ void webLinkLine(char* s) {
   if (cmd == 'W') {
     // new app connection (no "@W" for over 8 s): open the Web section;
     // if Web was closed by hand while the app is connected, do not force it, only hint with "@X"
-    bool fresh = !s_linkWMs || msSince(now, s_linkWMs) > 8000;
+    bool fresh = !s_linkWMs || msSince(now, s_linkWMs) > 8000 || (now < 15000 && !s_on);
     s_linkWMs = now ? now : 1;
     if (!s_on && fresh) { powerTouch(); navOpen(&webSection); }
     if (!s_on) {                                   // nothing to subscribe to: section closed

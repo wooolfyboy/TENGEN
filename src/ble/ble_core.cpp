@@ -717,8 +717,8 @@ void bleForEachEnt(BleEntCb cb, void* ctx) {
       Agg& a = locEnts[d.ent];
       float ageS = msSince(now, d.t) / 1000.0f;
       float w = 1.0f / (1.0f + ageS * 0.4f);
-      // Blend raw rssi, smoothed rssiS, and rmax to preserve sub-dB resolution
-      float rSub = d.rssiS * 0.65f + d.rssi * 0.25f + d.rmax * 0.10f;
+      // Use smoothed rssiS + subtle rmax envelope (no raw single-packet d.rssi jitter!)
+      float rSub = d.rssiS * 0.85f + d.rmax * 0.15f;
       a.rssiSum += rSub * w;
       a.weightSum += w;
       if (a.t == 0 || d.rssi > a.peakRssi) a.peakRssi = d.rssi;
