@@ -683,8 +683,9 @@ void bleLocatorBoost(bool on) {
   if (was) s->stop();
   s->setActiveScan(true);
   if (on) {
-    s->setInterval(64);   // 40 ms interval
-    s->setWindow(52);     // 32.5 ms window (~81% BLE duty cycle while leaving room for Ch 6 ESP-NOW!)
+    // 50% duty cycle (25 ms BLE / 25 ms Wi-Fi every 50 ms) so ESP-NOW packets on Ch 6 never get starved!
+    s->setInterval(80);
+    s->setWindow(42);
   } else {
     s->setInterval(100);
     s->setWindow(45);

@@ -203,7 +203,7 @@ static void radiosStart() {
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_channel(TENGEN_CH, WIFI_SECOND_CHAN_NONE);
   esp_wifi_set_promiscuous(false);
-  esp_wifi_set_ps(WIFI_PS_MIN_MODEM);   // sleep Wi-Fi modem between packets
+  esp_wifi_set_ps(WIFI_PS_NONE); // required for unassociated WIFI_STA ESP-NOW + BLE coexistence
 
   if (esp_now_init() == ESP_OK) {
     esp_now_register_recv_cb(onEspNowRecv);
@@ -265,6 +265,8 @@ static void sendPacket(uint32_t now) {
   uint8_t bcast[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
   size_t len = 12 + pkt.count * sizeof(EarEntry);
   esp_now_send(bcast, (const uint8_t*)&pkt, len);
+  delay(24); // second micro-burst 24 ms later guarantees hitting T-Embed's Wi-Fi coexistence window
+  esp_now_send(bcast, (const uint8_t*)&pkt, len);
 }
 
 // Minimal direct screen draw (no RAM sprite, redrawn only every 5s or on button press)
@@ -313,7 +315,7 @@ static void drawMinimal(uint32_t now) {
 }
 
 void setup() {
-  setCpuFrequencyMhz(80);   // 80 MHz cuts CPU power drain by >50%!
+  setCpuFrequencyMhz(160);  // 160 MHz is the minimum required by ESP32 for Wi-Fi + BLE coexistence
 
   pinMode(BTN_A_PIN, INPUT);
   pinMode(BTN_B_PIN, INPUT);
@@ -366,8 +368,8 @@ void loop() {
   prevB = curB;
 
   if (s_active) {
-    // Transmit every 1.2s (halves radio TX energy while keeping smooth 3D Locator updates)
-    if (now - s_txMs >= 1200) {
+    // Transmit every 650 ms with a 24 ms twin-packet so T-Embed never misses a frame
+    if (now - s_txMs >= 650) {
       s_txMs = now;
       sendPacket(now);
     }
