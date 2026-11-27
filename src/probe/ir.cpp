@@ -24,7 +24,7 @@ static bool       s_emLearn = false;  // true while Settings -> Emergency is ope
 static uint32_t   s_bgGen = 0;
 
 // Bound emergency IR trigger (persisted in NVS "radar"):
-// kind: 0 = none, 1 = decoded protocol (proto+addr+cmd), 2 = 42-bit Malata pulse-distance, 3 = raw hash
+// kind: 0 = none, 1 = decoded protocol (proto+addr+cmd), 2 = 42-bit pulse-distance, 3 = raw hash
 static uint8_t    s_emKind = 0;
 static char       s_emProto[12] = "";
 static uint32_t   s_emAddr = 0, s_emCmd = 0;
@@ -89,8 +89,8 @@ void irEvilLabel(char* out, size_t n) {
   }
 }
 
-// Jitter-proof pulse-distance decoder for 42-bit Malata frames (~9000/4500 header + 42 bits, 560 vs 1690 us gaps)
-static bool decodeMalata42(const uint16_t* raw, int rawN, uint64_t& out) {
+// Jitter-proof pulse-distance decoder for 42-bit NEC-like frames (~9000/4500 header + 42 bits, 560 vs 1690 us gaps)
+static bool decodePulse42(const uint16_t* raw, int rawN, uint64_t& out) {
   if (rawN < 85 || rawN > 89) return false;
   if (raw[0] < 7000 || raw[0] > 11500 || raw[1] < 3000 || raw[1] > 6000) return false;
   uint64_t v = 0;
@@ -112,7 +112,7 @@ static void saveEvilTrigger(const IrCode& c, const uint16_t* raw, int rawN) {
     s_emAddr = c.addr;
     s_emCmd  = c.cmd;
     s_emBits = 0;
-  } else if (decodeMalata42(raw, rawN, bits)) {
+  } else if (decodePulse42(raw, rawN, bits)) {
     s_emKind = 2;
     s_emProto[0] = 0;
     s_emAddr = 0;
@@ -144,7 +144,7 @@ static bool isEvilTrigger(const IrCode& c, const uint16_t* raw, int rawN) {
     return strcmp(c.proto, s_emProto) == 0 && c.addr == s_emAddr && c.cmd == s_emCmd;
   }
   if (s_emKind == 2) {
-    return decodeMalata42(raw, rawN, bits) && bits == s_emBits;
+    return decodePulse42(raw, rawN, bits) && bits == s_emBits;
   }
   if (s_emKind == 3) {
     return strcmp(c.proto, "RAW") == 0 && c.cmd == s_emCmd;

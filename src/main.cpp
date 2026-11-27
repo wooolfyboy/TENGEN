@@ -74,7 +74,7 @@ void setup() {
   bootScreen();          // boot animation
   bleBegin();
   audioBegin();          // speaker: UI sounds
-  irBegin();             // background IR receiver (Malata emergency trigger)
+  irBegin();             // background IR receiver (emergency shutdown trigger)
   satBegin();            // saved satellite orbits (Gallery > Globe)
   navBegin();
   navDraw(millis());
