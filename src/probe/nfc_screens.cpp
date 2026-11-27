@@ -21,10 +21,10 @@ void iconCard(int x, int y, uint16_t c, uint16_t bg) {
   }
 }
 
-// card silhouette: chip = smart/bank, bank = "not read" instead of a number
+// card silhouette: cut-corner HUD card; chip = smart/bank, bank = "not read" instead of a number
 static void card(int x, int y, int w, int h, uint16_t edge, uint16_t fill, bool chip, bool bank) {
-  spr.fillSmoothRoundRect(x, y, w, h, 6, fill, C_BG());
-  spr.drawSmoothRoundRect(x, y, 6, 5, w, h, edge, C_BG());
+  hudPanel(x, y, w, h, 8, fill, true, C_BG());
+  hudPanel(x, y, w, h, 8, edge, false, C_BG());
   for (int i = 0; i < 3; i++) spr.drawArc(x + w - 22, y + 16, 3 + i * 4, 2 + i * 4, 225, 315, edge, fill, true);   // contactless symbol
   if (chip) {
     int cx = x + 12, cy = y + h / 2 - 9;

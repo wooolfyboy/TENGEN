@@ -91,7 +91,26 @@ $('go').onclick = async () => {
       }
     });
     $('bar').style.width = '100%';
-    try { await loader.after(); } catch (e) {}
+    // 1) Clear RTC_CNTL_FORCE_DOWNLOAD_BOOT (bit 0 of 0x6000812C). Another firmware (auto-updater) may
+    //    leave it set; then every reset drops the chip back into the ROM bootloader.
+    try {
+      const OPT1 = 0x6000812C;
+      const before = await loader.readReg(OPT1);
+      log('FORCE_DOWNLOAD flag before: ' + (before & 1) + '\n');
+      await loader.writeReg(OPT1, 0, 1);
+      log('FORCE_DOWNLOAD flag after: ' + ((await loader.readReg(OPT1)) & 1) + '\n');
+    } catch (e) { log('flag clear failed: ' + (e && e.message || e) + '\n'); }
+    // 2) Reset into the firmware with separate DTR/RTS steps (native USB of ESP32-S3).
+    try {
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
+      await transport.setDTR(false); await sleep(100);
+      await transport.setRTS(false); await sleep(100);
+      await transport.setRTS(true);  await sleep(100);
+      await transport.setRTS(false); await sleep(100);
+    } catch (e) {
+      log('split reset failed: ' + (e && e.message || e) + '\n');
+      try { await loader.after(); } catch (e2) {}
+    }
     try { await transport.disconnect(); } catch (e) {}
     st(T.done, 'ok');
   } catch (e) {

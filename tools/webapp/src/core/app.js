@@ -2,11 +2,27 @@
 const App = T.app = { cur: null };
 const nav = document.getElementById('nav'), subs = document.getElementById('subs'), main = document.getElementById('main');
 const elBat = document.getElementById('bat'), elRadios = document.getElementById('radios'), elClock = document.getElementById('clock'), elFps = document.getElementById('fps'), elUpd = document.getElementById('upd'), elSet = document.getElementById('setBtn');
+const elZenSt = document.getElementById('zenState'), elZenKj = document.getElementById('zenKj'), elZenMeter = document.getElementById('zenMeter');
+const ZEN_NAMES = ['平穏', '活発', '注意', '警報'];
+App.zenTick = () => {
+  if (!elZenKj || !S.activity) return;
+  const A = S.activity(), lv = S.actState ? S.actState(A.v) : 0;
+  elZenKj.textContent = ZEN_NAMES[lv] || '平穏';
+  if (elZenSt) elZenSt.classList.toggle('warn', lv >= 2);
+  if (elZenMeter) {
+    const bars = elZenMeter.children, lit = Math.round(T.clamp(A.v) * bars.length);
+    for (let i = 0; i < bars.length; i++) {
+      bars[i].className = i < lit ? (lv >= 2 && i >= bars.length - 2 ? 'hot' : 'on') : '';
+      bars[i].style.transform = `scaleY(${(0.35 + 0.65 * (i + 1) / bars.length).toFixed(2)})`;
+    }
+  }
+};
 App.status = () => {
   const s = S.st; if (!s) return;
   elBat.textContent = s.bat >= 0 ? 'BAT ' + s.bat + '%' + (s.usb ? ' ⚡' : '') : '';
   const r = s.radio || '', names = [['b', 'BLE'], ['w', 'WIFI'], ['s', 'SUB'], ['m', 'MIC'], ['p', 'PC'], ['i', 'IR'], ['n', 'NFC']];
   elRadios.innerHTML = names.map(([k, n]) => `<i class="${r.includes(k) ? 'on' : ''}">${n}</i>`).join('');
+  App.zenTick();
 };
 
 const updClock = () => { const d = new Date(); elClock.textContent = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
@@ -94,18 +110,18 @@ App.rewant = () => {
   const want = (typeof v.want === 'function' ? v.want() : v.want) || 'st';   // gallery needs nothing from the stick, only status
   if (want !== T.Stream.want) T.Stream.connect(want);
 };
-let toolsBtnAdded = false;
+let toolsBtnAdded = false, navSeq = 0;
 T.views.forEach(v => {
   if (v.id === 'set') return;
   if (v.group === 'tools') {
     if (toolsBtnAdded) return;
     toolsBtnAdded = true;
-    const b = T.el('button', '', T.tr('Tools')); b.dataset.id = 'tools';
+    const b = T.el('button', '', T.tr('Tools')); b.dataset.id = 'tools'; b.dataset.idx = String(++navSeq).padStart(2, '0');
     b.onclick = () => { T.auto && T.auto.onUserNav(); App.go('tools'); };
     nav.appendChild(b);
     return;
   }
-  const b = T.el('button', '', T.tr(v.title)); b.dataset.id = v.id;
+  const b = T.el('button', '', T.tr(v.title)); b.dataset.id = v.id; b.dataset.idx = String(++navSeq).padStart(2, '0');
   b.onclick = () => { T.auto && T.auto.onUserNav(); App.go(v.id); };
   nav.appendChild(b);
 });
@@ -170,6 +186,7 @@ const loop = now => {
   if (fpsT >= 1) {
     const fps = Math.round(fpsN / fpsT); T.fps = fps;
     if (!SHOT) App.adapt(fps);
+    App.zenTick();
     if (T.showFps) elFps.textContent = fps + ' FPS' + (T.RS < 1 ? ' · ' + Math.round(T.RS * 100) + '%' : '') + (T.Q.bloom ? '' : ' · LITE');
     // app: page update state from the stick (diagnostics); tap = check now
     const UP = T.debug && window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.TengenUpdate;

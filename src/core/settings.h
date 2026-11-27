@@ -35,6 +35,9 @@ extern int g_wifiTicks;                    // closer/farther ticks in Wi-Fi Find
 extern int g_wRange;                       // Wi-Fi: hide networks weaker than this (index into RANGES)
 extern int g_sndIdx;                       // sounds: 0 off, 1 quiet, 2 loud
 extern int g_dimIdx;                       // auto-dim: index into DIM_SECS (0 = off)
+extern int g_emVol;                        // emergency shutdown siren volume (0..100%)
+extern int g_emLed;                        // emergency shutdown LED brightness (0..100%)
+extern int g_emSec;                        // emergency shutdown countdown time (1..30 s)
 static const uint16_t DIM_SECS[] = { 0, 30, 60, 300 };
 static const int N_DIMS = sizeof(DIM_SECS) / sizeof(DIM_SECS[0]);
 

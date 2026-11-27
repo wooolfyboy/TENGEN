@@ -83,8 +83,8 @@ T.fit = (g, s, max) => {
 // ---- layout unit: 16 px on a 1280x800 tablet, proportional elsewhere ----
 T.unit = (W, H) => Math.min(W / 80, H / 50);
 
-// ---- HUD brushes (like ui.cpp on the stick) ----
-// header "// TITLE" + status on the right + fading line
+// ---- HUD brushes (like ui.cpp on the stick): Zen air + subtle Evangelion precision ----
+// header "// TITLE" + status on the right + fading line with origin diamond & terminal tick
 T.header = (g, x, y, w, u, title, status, alert) => {
   T.txt(g, '// ' + String(title).toUpperCase(), x, y + u * 1.55, u * 1.8, T.C.acc, 't');
   if (status) {
@@ -93,13 +93,17 @@ T.header = (g, x, y, w, u, title, status, alert) => {
     g.font = `${u * 0.92}px ${T.FM}`;
     T.txt(g, T.fit(g, String(status).toUpperCase(), Math.max(u * 4, room)), x + w, y + u * 1.45, u * 0.92, alert ? T.C.alert : T.C.label, 'm', 'right');
   }
+  const ly = y + u * 2.1, lh = Math.max(1, u * 0.08);
   const gr = g.createLinearGradient(x, 0, x + w, 0);
-  gr.addColorStop(0, `rgba(${T.RGB.acc},1)`); gr.addColorStop(1, `rgba(${T.RGB.acc},.15)`);
-  g.fillStyle = gr; g.fillRect(x, y + u * 2.1, w, Math.max(1, u * 0.08));
+  gr.addColorStop(0, `rgba(${T.RGB.acc},1)`); gr.addColorStop(0.75, `rgba(${T.RGB.acc},.32)`); gr.addColorStop(1, `rgba(${T.RGB.acc},.10)`);
+  g.fillStyle = gr; g.fillRect(x, ly, w, lh);
+  T.diamond(g, x, ly + lh * 0.5, Math.max(2, u * 0.2), alert ? T.C.alert : T.C.acc, true);
+  g.fillStyle = alert ? T.C.alert : T.C.acc; g.fillRect(x + w - 1, ly - u * 0.18, 1.5, u * 0.36 + lh);
 };
-T.dots = (g, x, y, u, n, i) => { for (let k = 0; k < n; k++) { const on = k === i; g.fillStyle = on ? T.C.acc : T.C.line; g.fillRect(x + k * u * 0.85, y, on ? u * 0.55 : u * 0.3, u * 0.3); } };
+T.dots = (g, x, y, u, n, i) => { for (let k = 0; k < n; k++) { const on = k === i; g.fillStyle = on ? T.C.acc : T.C.line; g.fillRect(x + k * u * 0.85, y, on ? u * 0.58 : u * 0.28, u * 0.28); } };
 T.footer = (g, x, y, w, u, l, r) => {
   g.fillStyle = T.C.line; g.fillRect(x, y, w, 1);
+  g.fillStyle = T.C.acc; g.fillRect(x, y - 1, u * 0.6, 2); g.fillRect(x + w - u * 0.6, y - 1, u * 0.6, 2);
   if (l) T.txt(g, String(l).toUpperCase(), x, y + u * 1.25, u * 0.8, T.C.dim);
   if (r) T.txt(g, String(r).toUpperCase(), x + w, y + u * 1.25, u * 0.8, T.C.dim, 'm', 'right');
 };
@@ -112,9 +116,17 @@ T.brackets = (g, x, y, w, h, L, col = T.C.acc, lw = 1.5) => {
   g.stroke();
 };
 T.cutPath = (g, x, y, w, h, c) => { g.beginPath(); g.moveTo(x + c, y); g.lineTo(x + w, y); g.lineTo(x + w, y + h - c); g.lineTo(x + w - c, y + h); g.lineTo(x, y + h); g.lineTo(x, y + c); g.closePath(); };
-// panel with cut corners; "glass" over the 3D scene by default
+// panel with cut corners + delicate corner chamfer ticks; "glass" over the 3D scene by default
 T.panel = (g, x, y, w, h, u, fill = `rgba(${T.RGB.panel},.28)`, stroke = `rgba(${T.RGB.acc},.22)`) => {
-  T.cutPath(g, x, y, w, h, u * 0.8); g.fillStyle = fill; g.fill(); g.strokeStyle = stroke; g.lineWidth = 1; g.stroke();
+  const c = u * 0.8;
+  T.cutPath(g, x, y, w, h, c); g.fillStyle = fill; g.fill(); g.strokeStyle = stroke; g.lineWidth = 1; g.stroke();
+  const L = Math.min(u * 0.9, w * 0.15, h * 0.15);
+  if (L > 4) {
+    g.strokeStyle = `rgba(${T.RGB.acc},.48)`; g.lineWidth = 1.2; g.beginPath();
+    g.moveTo(x + w - L, y); g.lineTo(x + w, y); g.lineTo(x + w, y + L);
+    g.moveTo(x + L, y + h); g.lineTo(x, y + h); g.lineTo(x, y + h - L);
+    g.stroke();
+  }
 };
 // segmented bar with reflection
 T.segBar = (g, x, y, w, h, v, n, refl = true, alert = false) => {
@@ -302,9 +314,25 @@ T.hits = {
   rect(x, y, w, h, data) { this.list.push({ x, y, w, h, data }); },
   at(x, y) { for (let i = this.list.length - 1; i >= 0; i--) { const h = this.list[i]; if (h.r != null) { if ((x - h.x) ** 2 + (y - h.y) ** 2 <= h.r * h.r) return h.data; } else if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) return h.data; } return null; },
 };
-// empty / no link: the same in every section
+// empty / no link: living Zen Ensō horizon + seal stamp, shared across all sections
 T.emptyState = (g, W, H, u, title, line, alert) => {
-  T.txt(g, title, W / 2, H / 2 - u * 0.4, u * 1.9, alert ? T.C.alert : T.C.hot, 't', 'center');
-  if (line) T.txt(g, String(line).toUpperCase(), W / 2, H / 2 + u * 1.3, u * 0.85, T.C.label, 'm', 'center');
+  const cx = W / 2, cy = H / 2 - u * 2.2, t = T.reduce ? 0 : performance.now() * 0.001;
+  const col = alert ? T.C.alert : T.C.acc, rgb = alert ? `${T.ALERT[0]},${T.ALERT[1]},${T.ALERT[2]}` : T.RGB.acc;
+  const R = u * 3.1 + Math.sin(t * 1.3) * u * 0.12;
+  // Outer incomplete Ensō arc + inner counter-rotating calibration arc
+  g.strokeStyle = `rgba(${rgb},.52)`; g.lineWidth = Math.max(1.4, u * 0.11);
+  g.beginPath(); g.arc(cx, cy, R, t * 0.28, t * 0.28 + Math.PI * 1.68); g.stroke();
+  g.strokeStyle = `rgba(${rgb},.24)`; g.lineWidth = 1;
+  g.beginPath(); g.arc(cx, cy, R * 0.72, -t * 0.4 + 0.8, -t * 0.4 + 0.8 + Math.PI * 1.35); g.stroke();
+  // 4 cardinal hairline ticks
+  for (let k = 0; k < 4; k++) {
+    const a = k * Math.PI / 2;
+    g.beginPath(); g.moveTo(cx + Math.cos(a) * (R * 1.08), cy + Math.sin(a) * (R * 1.08));
+    g.lineTo(cx + Math.cos(a) * (R * 1.24), cy + Math.sin(a) * (R * 1.24)); g.stroke();
+  }
+  const sz = u * 2.1;
+  T.drawSealChar(g, cx - sz / 2, cy - sz / 2, sz, alert ? '警' : '静', col, !!alert);
+  T.txt(g, title, cx, cy + R + u * 2.4, u * 1.85, alert ? T.C.alert : T.C.hot, 't', 'center');
+  if (line) T.txt(g, String(line).toUpperCase(), cx, cy + R + u * 4.0, u * 0.84, T.C.label, 'm', 'center');
 };
 /*@DATA*/

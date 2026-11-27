@@ -87,16 +87,29 @@ void drawSubmenu(const char* title, uint16_t acc, SubItem* it, int n, int sel) {
   spr.fillSprite(C_BG());
   uiHeader(title, L("click: open", "нажать: открыть"));
   int rh = n > 5 ? 18 : 25, y0 = UI_TOP + 1;
+  // Spring-smoothed selection bar: animates at 60 fps while moving, settles to 0 SPI rows when still
+  static float s_subY = -1.0f;
+  static const char* s_lastTitle = nullptr;
+  float targetY = (float)(y0 + sel * rh);
+  if (s_lastTitle != title || s_subY < 0) { s_subY = targetY; s_lastTitle = title; }
+  else {
+    float d = targetY - s_subY;
+    if (fabsf(d) > 0.45f) { s_subY += d * 0.36f; g_fastFrame = true; }
+    else s_subY = targetY;
+  }
+  int sy = (int)lroundf(s_subY);
+  if (themeKurenai()) {
+    int x0 = UI_M - 4, x1 = W - UI_M + 4, h = rh - 2;
+    spr.fillTriangle(x0 + 5, sy, x1, sy, x0, sy + h, C_HOT());
+    spr.fillTriangle(x1, sy, x1 - 5, sy + h, x0, sy + h, C_HOT());
+    spr.fillRect(x0 + 2, sy + 3, 3, h - 6, C_ACC());
+  } else {
+    uiRowHighlight(sy, rh - 2);
+  }
   for (int i = 0; i < n; i++) {
     int y = y0 + i * rh, cy = y + (rh - 2) / 2;
-    bool isSel = (i == sel);
-    bool plate = isSel && themeKurenai();             // KURENAI: selected row is a white cut-corner plate
-    if (plate) {
-      int x0 = UI_M - 4, x1 = W - UI_M + 4, h = rh - 2;
-      spr.fillTriangle(x0 + 5, y, x1, y, x0, y + h, C_HOT());
-      spr.fillTriangle(x1, y, x1 - 5, y + h, x0, y + h, C_HOT());
-      spr.fillRect(x0 + 2, y + 3, 3, h - 6, C_ACC());
-    } else if (isSel) uiRowHighlight(y, rh - 2);
+    bool isSel = (abs(y - sy) < rh / 2);
+    bool plate = isSel && themeKurenai();
     spr.setTextDatum(ML_DATUM);
     spr.setTextColor(plate ? C_BG() : isSel ? C_HOT() : UI_LABEL());
     txt(it[i].name, UI_M + 8, cy + 1, n > 5 ? 2 : 4);

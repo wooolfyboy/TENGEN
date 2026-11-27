@@ -3,10 +3,14 @@
 //  Runs only while the section is open or the tablet is subscribed to "ir".
 // ============================================================
 #include "probe/ir.h"
+#include <Preferences.h>
 #include "core/lang.h"
 #include "core/jsonutil.h"
 #include "core/crumb.h"
 #include "core/board.h"
+#include "core/leds.h"
+#include "core/power.h"
+#include "audio/audio.h"
 
 #define IR_RX_PIN 1                   // BOARD_IR_RX (utilities.h LilyGO)
 #define IR_TX_PIN 2                   // IR LED: keep it off
@@ -15,13 +19,23 @@
 static rmt_data_t s_buf[IR_SYMS];
 static size_t     s_n = IR_SYMS;
 static bool       s_armed = false;
+static bool       s_inspect = false;  // true while IR section or tablet IR tab is open
+static bool       s_emLearn = false;  // true while Settings -> Emergency is open (binds next IR key)
+static uint32_t   s_bgGen = 0;
+
+// Bound emergency IR trigger (persisted in NVS "radar"):
+// kind: 0 = none, 1 = decoded protocol (proto+addr+cmd), 2 = 42-bit Malata pulse-distance, 3 = raw hash
+static uint8_t    s_emKind = 0;
+static char       s_emProto[12] = "";
+static uint32_t   s_emAddr = 0, s_emCmd = 0;
+static uint64_t   s_emBits = 0;
 
 static void arm() {
   s_n = IR_SYMS;
   s_armed = rmtReadAsync(IR_RX_PIN, s_buf, &s_n);
 }
 
-bool irStart() {
+static bool irInitHw() {
   if (g_ir.on) return g_ir.ok;
   crumb("ir start");
   pinMode(IR_TX_PIN, OUTPUT); digitalWrite(IR_TX_PIN, LOW);      // transmitter off
@@ -36,12 +50,120 @@ bool irStart() {
   return ok;
 }
 
+void irBegin() {
+  Preferences p;
+  if (p.begin("radar", true)) {
+    s_emKind = (uint8_t)p.getUChar("emk", 0);
+    s_emAddr = p.getUInt("ema", 0);
+    s_emCmd  = p.getUInt("emc", 0);
+    s_emBits = p.getULong64("embits", 0);
+    String pr = p.getString("emp", "");
+    strlcpy(s_emProto, pr.c_str(), sizeof(s_emProto));
+    p.end();
+  }
+  irInitHw();
+  s_bgGen = g_ir.gen;
+}
+
+bool irStart() {
+  s_inspect = true;
+  return irInitHw();
+}
+
 void irStop() {
-  if (!g_ir.on) return;
-  crumb("ir stop");
-  if (g_ir.ok) rmtDeinit(IR_RX_PIN);
-  s_armed = false;
-  g_ir.on = false;
+  s_inspect = false;
+  s_bgGen = g_ir.gen;                 // ignore bursts captured while inspecting remotes
+}
+
+void irEvilSetLearn(bool on) {
+  s_emLearn = on;
+  s_bgGen = g_ir.gen;
+}
+
+void irEvilLabel(char* out, size_t n) {
+  switch (s_emKind) {
+    case 1: snprintf(out, n, "%.6s %lX:%lX", s_emProto, (unsigned long)s_emAddr, (unsigned long)s_emCmd); break;
+    case 2: snprintf(out, n, "42b %04lX", (unsigned long)(s_emBits & 0xFFFF)); break;
+    case 3: snprintf(out, n, "RAW %04lX", (unsigned long)(s_emCmd & 0xFFFF)); break;
+    default: snprintf(out, n, "%s", L("press IR...", "нажми ИК...")); break;
+  }
+}
+
+// Jitter-proof pulse-distance decoder for 42-bit Malata frames (~9000/4500 header + 42 bits, 560 vs 1690 us gaps)
+static bool decodeMalata42(const uint16_t* raw, int rawN, uint64_t& out) {
+  if (rawN < 85 || rawN > 89) return false;
+  if (raw[0] < 7000 || raw[0] > 11500 || raw[1] < 3000 || raw[1] > 6000) return false;
+  uint64_t v = 0;
+  for (int b = 0; b < 42; b++) {
+    uint16_t mk = raw[2 + 2 * b];
+    uint16_t sp = raw[2 + 2 * b + 1];
+    if (mk < 200 || mk > 1100 || sp < 200 || sp > 2600) return false;
+    if (sp > 1100) v |= (1ULL << b);
+  }
+  out = v;
+  return v != 0;
+}
+
+static void saveEvilTrigger(const IrCode& c, const uint16_t* raw, int rawN) {
+  uint64_t bits = 0;
+  if (strcmp(c.proto, "RAW") != 0) {
+    s_emKind = 1;
+    strlcpy(s_emProto, c.proto, sizeof(s_emProto));
+    s_emAddr = c.addr;
+    s_emCmd  = c.cmd;
+    s_emBits = 0;
+  } else if (decodeMalata42(raw, rawN, bits)) {
+    s_emKind = 2;
+    s_emProto[0] = 0;
+    s_emAddr = 0;
+    s_emCmd  = 0;
+    s_emBits = bits;
+  } else {
+    s_emKind = 3;
+    s_emProto[0] = 0;
+    s_emAddr = 0;
+    s_emCmd  = c.cmd;
+    s_emBits = 0;
+  }
+  Preferences p;
+  if (p.begin("radar", false)) {
+    p.putUChar("emk", s_emKind);
+    p.putString("emp", s_emProto);
+    p.putUInt("ema", s_emAddr);
+    p.putUInt("emc", s_emCmd);
+    p.putULong64("embits", s_emBits);
+    p.end();
+  }
+  audioSiren(1600, 60, 45);
+  ledsEvent(2);
+}
+
+static bool isEvilTrigger(const IrCode& c, const uint16_t* raw, int rawN) {
+  uint64_t bits = 0;
+  if (s_emKind == 1) {
+    return strcmp(c.proto, s_emProto) == 0 && c.addr == s_emAddr && c.cmd == s_emCmd;
+  }
+  if (s_emKind == 2) {
+    return decodeMalata42(raw, rawN, bits) && bits == s_emBits;
+  }
+  if (s_emKind == 3) {
+    return strcmp(c.proto, "RAW") == 0 && c.cmd == s_emCmd;
+  }
+  return false;
+}
+
+void irPollBg(uint32_t now) {
+  irTick(now);
+  if (g_ir.gen == s_bgGen) return;
+  s_bgGen = g_ir.gen;
+  if (!g_ir.have || g_ir.last.rep) return;
+  if (s_emLearn) {
+    saveEvilTrigger(g_ir.last, g_ir.raw, g_ir.rawN);
+    return;
+  }
+  if (isEvilTrigger(g_ir.last, g_ir.raw, g_ir.rawN)) {
+    powerEmergency();
+  }
 }
 
 void irTick(uint32_t now) {
@@ -69,7 +191,7 @@ void irTick(uint32_t now) {
     }
   }
   if (n && n % 2 == 0 && d[n - 1] > 10000) n--;              // trailing silence is not a gap
-  if (n >= 3) irFeed(d, n, now);                             // pass full length so >=70-bit AC remotes are recognized
+  if (n >= 3) { irFeed(d, n, now); if (s_inspect) ledsEvent(2); } // ripple LEDs only on IR screen
   arm();
 }
 

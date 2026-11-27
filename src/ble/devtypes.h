@@ -56,18 +56,45 @@ inline char typeGlyph(uint8_t t) {
 }
 
 
+// ---------- device intelligence flags (bitmask) ----------
+enum DevFlags : uint8_t {
+  DF_ACTIVE    = 1 << 0,  // high packet rate or screen-on/unlocked
+  DF_MOVING    = 1 << 1,  // RSSI jitter indicates motion / in-hand
+  DF_SEPARATED = 1 << 2,  // AirTag / Find My separated from owner
+  DF_LID_OPEN  = 1 << 3,  // AirPods / Beats case lid open
+  DF_IN_EAR    = 1 << 4,  // AirPods / Beats worn in ear
+  DF_HOTSPOT   = 1 << 5,  // Apple Instant Hotspot active
+  DF_PAIRING   = 1 << 6,  // Swift Pair / Fast Pair pairing mode
+  DF_HAS_TX    = 1 << 7,  // real TX Power read from advertisement
+};
+
 // ---------- parsed advertisement ----------
 struct AdvInfo {
   bool     hasMfr = false;
   uint16_t cid = 0;           // manufacturer Company ID
-  uint8_t  mfr[8] = {0};      // first bytes of manufacturer data (after CID)
+  uint8_t  mfr[24] = {0};     // first 24 bytes of manufacturer data (after CID)
   uint8_t  mfrLen = 0;        // full length of manufacturer data (after CID)
   uint16_t uuids[8];          // 16-bit service UUIDs (+ from service data)
   uint8_t  nUuid = 0;
   bool     hasApp = false;
   uint16_t appearance = 0;
+  bool     hasTx = false;
+  int8_t   txPwr = 127;       // AD 0x0A TX Power Level (dBm)
+  uint32_t fastPairId = 0;    // Google Fast Pair 24-bit model ID (0 = none)
   char     name[24] = {0};
   uint8_t  nameLen = 0;
+};
+
+// Decoded rich telemetry from a single BLE advertisement
+struct BleIntel {
+  uint8_t  flags = 0;         // DF_* bits
+  int8_t   txPwr = 127;       // 127 = unknown
+  uint8_t  bat = 255;         // 0..100 overall battery, 255 = unknown
+  uint8_t  batL = 255;        // AirPods left (0..100, 255 = unknown)
+  uint8_t  batR = 255;        // AirPods right
+  uint8_t  batC = 255;        // AirPods case
+  char     model[22] = {0};   // e.g. "AirPods Pro 2", "WH-1000XM5"
+  char     state[24] = {0};   // e.g. "Screen on", "AirDrop", "Swift Pair"
 };
 
 inline void addUuid(AdvInfo& a, uint16_t u) {
@@ -88,8 +115,21 @@ inline void parseAdv(const uint8_t* p, size_t n, AdvInfo& a) {
       case 0x02: case 0x03:                          // 16-bit UUID list
         for (uint8_t k = 0; k + 1 < dl; k += 2) addUuid(a, d[k] | (d[k + 1] << 8));
         break;
+      case 0x0A:                                     // TX Power Level (dBm)
+        if (dl >= 1) {
+          int8_t tp = (int8_t)d[0];
+          if (tp >= -100 && tp <= 20) { a.hasTx = true; a.txPwr = tp; }
+        }
+        break;
       case 0x16:                                     // service data (16-bit UUID)
-        if (dl >= 2) addUuid(a, d[0] | (d[1] << 8));
+        if (dl >= 2) {
+          uint16_t u = d[0] | (d[1] << 8);
+          addUuid(a, u);
+          // Google Fast Pair: 0xFE2C with 3-byte model ID
+          if (u == 0xFE2C && dl == 5) {
+            a.fastPairId = ((uint32_t)d[2] << 16) | ((uint32_t)d[3] << 8) | d[4];
+          }
+        }
         break;
       case 0x08: case 0x09:                          // name (short / complete)
         if (t == 0x09 || a.nameLen == 0) {
@@ -111,6 +151,158 @@ inline void parseAdv(const uint8_t* p, size_t n, AdvInfo& a) {
         break;
     }
     i += 1 + L;
+  }
+}
+
+// ---------- Apple AirPods / Beats model lookup ----------
+inline const char* appleAudioModel(uint16_t id) {
+  switch (id) {
+    case 0x0220: return "AirPods 1";
+    case 0x0F20: return "AirPods 2";
+    case 0x1320: return "AirPods 3";
+    case 0x1920: return "AirPods 4";
+    case 0x1B20: return "AirPods 4 ANC";
+    case 0x0E20: return "AirPods Pro";
+    case 0x1420: return "AirPods Pro 2";
+    case 0x2420: return "AirPods Pro 2C";
+    case 0x0A20: return "AirPods Max";
+    case 0x0520: return "BeatsX";
+    case 0x0620: return "Beats Solo3";
+    case 0x0920: return "Beats Studio3";
+    case 0x0B20: return "Powerbeats Pro";
+    case 0x1020: return "Beats Flex";
+    case 0x1120: return "Studio Buds";
+    case 0x1220: return "Beats Fit Pro";
+    case 0x1620: return "Studio Buds+";
+    case 0x1720: return "Beats Studio Pro";
+    default:     return nullptr;
+  }
+}
+
+// ---------- Popular Google Fast Pair 24-bit model lookup ----------
+inline const char* fastPairModel(uint32_t id) {
+  switch (id) {
+    case 0xCD8256: return "Sony WF-1000XM4";
+    case 0x821F66: return "Sony WH-1000XM5";
+    case 0xD446A7: return "Sony WH-1000XM4";
+    case 0x01E5CE: return "Sony WF-1000XM5";
+    case 0x0582FD: return "Pixel Buds A";
+    case 0x9ADB11: return "Pixel Buds Pro";
+    case 0x06AE20: return "Galaxy Buds2 Pro";
+    case 0x00000A: return "Galaxy Buds2";
+    case 0xF52494: return "JBL Tune Buds";
+    case 0x718FA4: return "JBL Flip 6";
+    case 0x02D815: return "Nothing Ear (2)";
+    case 0x5A36A5: return "Bose QC Ultra";
+    case 0x000006: return "Google Fast Pair";
+    default:       return nullptr;
+  }
+}
+
+// ---------- Deep passive decoder (Apple Continuity, AirPods, Find My, Fast/Swift Pair) ----------
+inline void decodeIntel(const AdvInfo& a, BleIntel& out) {
+  if (a.hasTx) {
+    out.txPwr = a.txPwr;
+    out.flags |= DF_HAS_TX;
+  }
+  if (a.fastPairId) {
+    out.flags |= DF_PAIRING;
+    const char* fm = fastPairModel(a.fastPairId);
+    if (fm) strlcpy(out.model, fm, sizeof(out.model));
+    strlcpy(out.state, "Fast Pair", sizeof(out.state));
+  }
+  if (!a.hasMfr || a.mfrLen < 2) return;
+
+  // Microsoft Swift Pair (0x0006, beacon type 0x03)
+  if (a.cid == 0x0006 && a.mfr[0] == 0x03) {
+    out.flags |= DF_PAIRING;
+    strlcpy(out.state, "Swift Pair", sizeof(out.state));
+    return;
+  }
+
+  // Apple Continuity (0x004C)
+  if (a.cid != 0x004C) return;
+  uint8_t msgType = a.mfr[0];
+  uint8_t msgLen  = a.mfr[1];
+
+  // 0x07: AirPods / Beats Proximity Pairing
+  if (msgType == 0x07 && a.mfrLen >= 10) {
+    uint16_t mid = ((uint16_t)a.mfr[3] << 8) | a.mfr[4];
+    const char* am = appleAudioModel(mid);
+    if (am) strlcpy(out.model, am, sizeof(out.model));
+    uint8_t st = a.mfr[5];
+    bool flipped = (st & 0x20) == 0;
+    uint8_t b0 = a.mfr[6] & 0x0F;         // primary pod (0..10 -> 0..100%, 15 = N/A)
+    uint8_t b1 = (a.mfr[6] >> 4) & 0x0F;  // secondary pod
+    uint8_t bc = a.mfr[7] & 0x0F;         // case
+    uint8_t lRaw = flipped ? b1 : b0;
+    uint8_t rRaw = flipped ? b0 : b1;
+    if (lRaw <= 10) out.batL = lRaw * 10;
+    if (rRaw <= 10) out.batR = rRaw * 10;
+    if (bc   <= 10) out.batC = bc   * 10;
+    if (out.batL <= 100 && out.batR <= 100) out.bat = (out.batL + out.batR) / 2;
+    else if (out.batL <= 100) out.bat = out.batL;
+    else if (out.batR <= 100) out.bat = out.batR;
+    else if (out.batC <= 100) out.bat = out.batC;
+    if (st & 0x0A) out.flags |= DF_IN_EAR;
+    if (a.mfrLen >= 9 && (a.mfr[8] & 0x08) == 0) out.flags |= DF_LID_OPEN;
+    if (out.flags & DF_IN_EAR)        strlcpy(out.state, "In ear", sizeof(out.state));
+    else if (out.flags & DF_LID_OPEN) strlcpy(out.state, "Case open", sizeof(out.state));
+    else                              strlcpy(out.state, "In case", sizeof(out.state));
+    return;
+  }
+
+  // 0x10: Nearby Info (iPhone / iPad / Mac screen & activity status)
+  if (msgType == 0x10 && a.mfrLen >= 4) {
+    uint8_t act = a.mfr[2] & 0x0F;
+    switch (act) {
+      case 0x00: strlcpy(out.state, "Screen off", sizeof(out.state)); break;
+      case 0x01: case 0x03: strlcpy(out.state, "Lock screen", sizeof(out.state)); out.flags |= DF_ACTIVE; break;
+      case 0x05: case 0x07: case 0x0B: strlcpy(out.state, "Screen on", sizeof(out.state)); out.flags |= DF_ACTIVE; break;
+      case 0x09: strlcpy(out.state, "Media / Video", sizeof(out.state)); out.flags |= DF_ACTIVE; break;
+      case 0x0A: strlcpy(out.state, "Active / Call", sizeof(out.state)); out.flags |= DF_ACTIVE; break;
+      default:   break;
+    }
+    return;
+  }
+
+  // 0x0E: Instant Hotspot (battery + cellular)
+  if (msgType == 0x0E && a.mfrLen >= 8) {
+    out.flags |= DF_HOTSPOT | DF_ACTIVE;
+    if (a.mfr[4] <= 100) out.bat = a.mfr[4];
+    strlcpy(out.state, "Hotspot", sizeof(out.state));
+    return;
+  }
+
+  // 0x05: AirDrop
+  if (msgType == 0x05) {
+    out.flags |= DF_ACTIVE;
+    strlcpy(out.state, "AirDrop", sizeof(out.state));
+    return;
+  }
+
+  // 0x12: Find My / AirTag (nearby 2-byte vs separated 25-byte offline finding!)
+  if (msgType == 0x12 && a.mfrLen >= 3) {
+    uint8_t status = a.mfr[2];
+    uint8_t bCode = (status >> 6) & 0x03;
+    static const uint8_t BAT_MAP[4] = { 100, 65, 25, 10 };
+    out.bat = BAT_MAP[bCode];
+    if (msgLen >= 0x19) {
+      out.flags |= DF_SEPARATED;
+      strlcpy(out.state, "Separated!", sizeof(out.state));
+    } else {
+      strlcpy(out.state, "Near owner", sizeof(out.state));
+    }
+    return;
+  }
+
+  // 0x02: iBeacon (measured 1m RSSI at byte 22 -> convert to equivalent TX power)
+  if (msgType == 0x02 && a.mfrLen >= 23) {
+    int8_t meas1m = (int8_t)a.mfr[22];
+    if (meas1m <= -35 && meas1m >= -95) {
+      out.txPwr = (int8_t)constrain((int)meas1m + 58, -40, 20);
+      out.flags |= DF_HAS_TX;
+    }
   }
 }
 

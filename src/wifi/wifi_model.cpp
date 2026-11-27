@@ -30,6 +30,8 @@ float    g_actHist[ACT_HIST_N];
 int      g_actHistN = 0;
 std::map<uint64_t, Sta> g_stas;
 std::map<uint64_t, uint32_t> g_probes;
+ProbeSsid g_probeSsids[PROBE_SSID_MAX];
+int       g_nProbeSsids = 0;
 
 const char* ouiName(const uint8_t* mac) { return ouiVendor(mac); }
 

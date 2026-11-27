@@ -52,7 +52,7 @@ uint32_t g_actHistMs = 0;
 static const uint32_t HOP_MS = 200;
 
 // handler -> main loop events (ring buffer)
-struct PEv { uint8_t kind; uint8_t a[6]; uint8_t b[6]; };   // 1: data (a=device, b=network), 2: probe (a=source)
+struct PEv { uint8_t kind; uint8_t a[6]; uint8_t b[6]; char ssid[25]; };   // 1: data (a=device, b=network), 2: probe (a=source, optional searched ssid)
 #define PEV_N 128
 PEv g_pev[PEV_N];
 std::atomic<uint16_t> g_pevHead{0}, g_pevTail{0};
@@ -61,12 +61,22 @@ std::atomic<uint16_t> g_pevHead{0}, g_pevTail{0};
 static const uint32_t STA_REMEMBER_MS = 120000;
 static const size_t   STA_MAX = 500;
 
-static inline void IRAM_ATTR pushEv(uint8_t kind, const uint8_t* a, const uint8_t* b) {
+static inline void IRAM_ATTR pushEv(uint8_t kind, const uint8_t* a, const uint8_t* b, const uint8_t* ssid = nullptr, uint8_t slen = 0) {
   uint16_t h = g_pevHead.load(std::memory_order_relaxed), n = (h + 1) % PEV_N;
   if (n == g_pevTail.load(std::memory_order_acquire)) return;   // buffer full: drop
   PEv& e = g_pev[h];
   e.kind = kind;
   for (int i = 0; i < 6; i++) { e.a[i] = a[i]; e.b[i] = b ? b[i] : 0; }
+  uint8_t k = 0;
+  if (ssid && slen > 0) {
+    uint8_t m = slen < 24 ? slen : 24;
+    for (; k < m; k++) {
+      uint8_t c = ssid[k];
+      if (c < 0x20 || c > 0x7E) { k = 0; break; }
+      e.ssid[k] = (char)c;
+    }
+  }
+  e.ssid[k] = 0;
   g_pevHead.store(n, std::memory_order_release);
 }
 
@@ -78,7 +88,13 @@ static void IRAM_ATTR promCb(void* buf, wifi_promiscuous_pkt_type_t type) {
   int len = p->rx_ctrl.sig_len;
   if (type == WIFI_PKT_MGMT) {
     g_pMgmt++;
-    if (len >= 24 && (f[0] & 0xFC) == 0x40) pushEv(2, f + 10, nullptr);   // probe request
+    if (len >= 24 && (f[0] & 0xFC) == 0x40) {                             // probe request
+      const uint8_t* sptr = nullptr; uint8_t slen = 0;
+      if (len >= 26 && f[24] == 0x00 && f[25] > 0 && f[25] <= 32 && 26 + f[25] <= len) {
+        sptr = f + 26; slen = f[25];
+      }
+      pushEv(2, f + 10, nullptr, sptr, slen);
+    }
   } else if (type == WIFI_PKT_DATA) {
     g_pData++;
     if (len >= 24) {
@@ -268,12 +284,29 @@ static void wifiHopTick(uint32_t now) {
       uint64_t b = macKey(e.b);
       if (a == b) continue;
       auto it = g_stas.find(a);
-      if (it != g_stas.end()) it->second = { b, now };
-      else if (g_stas.size() < STA_MAX) g_stas[a] = { b, now };
+      if (it != g_stas.end()) {
+        it->second.bssid = b; it->second.t = now;
+        if (it->second.pkts < 65000) it->second.pkts++;
+      } else if (g_stas.size() < STA_MAX) g_stas[a] = { b, now, 1 };
     } else {
       auto it = g_probes.find(a);
       if (it != g_probes.end()) it->second = now;
       else if (g_probes.size() < STA_MAX) g_probes[a] = now;
+      if (e.ssid[0]) {
+        int found = -1;
+        for (int i = 0; i < g_nProbeSsids; i++) if (!strcmp(g_probeSsids[i].ssid, e.ssid)) { found = i; break; }
+        if (found >= 0) {
+          g_probeSsids[found].t = now;
+        } else {
+          if (g_nProbeSsids < PROBE_SSID_MAX) found = g_nProbeSsids++;
+          else {
+            found = 0;
+            for (int i = 1; i < g_nProbeSsids; i++) if (g_probeSsids[i].t < g_probeSsids[found].t) found = i;
+          }
+          strlcpy(g_probeSsids[found].ssid, e.ssid, sizeof(g_probeSsids[found].ssid));
+          g_probeSsids[found].t = now;
+        }
+      }
     }
   }
 

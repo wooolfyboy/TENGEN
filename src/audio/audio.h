@@ -8,6 +8,7 @@
 void audioBegin();                   // speaker (UI sounds)
 void audioClick();                   // wheel click
 void audioBeep(uint16_t hz, uint16_t ms);
+void audioSiren(uint16_t hz, uint16_t ms, int volPct);   // emergency siren (0..100%, ignores UI mute)
 void audioGeiger(int pct);           // Geiger counter: the closer (pct 0..100), the faster the clicks
 
 extern const Section soundSection;

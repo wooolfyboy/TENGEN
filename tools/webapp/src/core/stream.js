@@ -71,7 +71,7 @@ Stream.poll = (want) => {
       }
       if (has('ble') && n % 8 === 1) {
         const j = await J('/api/ble');
-        S.onBle({ on: j.on ? 1 : 0, n: j.count, m: j.macs, d: j.dev.map(d => [d.id, d.r, d.t, d.v, d.n, d.age, d.m]) });
+        S.onBle({ on: j.on ? 1 : 0, n: j.count, m: j.macs, d: j.dev.map(d => [d.id, d.r, d.t, d.v, d.n, d.age, d.m, '', d.f || 0, d.bat != null ? d.bat : -1, d.info || '', d.tx != null ? d.tx : 127]) });
       }
       if (has('wifi') && n % 40 === 1) S.onWifi(await J('/api/wifi'));
       if (has('sub') && n % 2 === 1) {

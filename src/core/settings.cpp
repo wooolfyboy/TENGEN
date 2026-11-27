@@ -14,6 +14,7 @@
 #include "core/battery.h"
 #include "core/ui.h"
 #include "audio/audio.h"
+#include "probe/ir.h"
 #include "subghz/subghz_model.h"
 #include "gallery/astro.h"
 
@@ -38,6 +39,7 @@ int g_wRange = 0;
 // alerts (HQ on tablet / PC): what counts as near, new, alarm, and how airwave activity is scored
 int g_alNear = -65, g_alNew = 1, g_alTrk = 1, g_alNewFor = 30, g_alWarm = 20, g_alSens = 5,
     g_alWarn = 60, g_alAlarm = 80, g_alCBle = 1, g_alCRf = 1, g_alCSnd = 1, g_alCPrb = 1, g_alBlink = 1, g_alPlate = 1;
+int g_emVol = 100, g_emLed = 100, g_emSec = 5;   // emergency IR shutdown (evil mode)
 
 static int      g_setPage = 0;           // page: general / section
 static int      g_setItem = 0;           // selected item on the page
@@ -54,8 +56,9 @@ enum { S_THEME, S_LANG, S_SCREEN, S_DIM, S_LEDBR, S_VOLUME, S_CLICKS, S_CITY, S_
        S_BAND,
        S_MIC, S_AULED, S_AUSRC,
        S_ALNEAR, S_ALNEW, S_ALTRK, S_ALNEWFOR, S_ALWARM, S_ALSENS, S_ALWARN, S_ALALARM,
-       S_ALCBLE, S_ALCRF, S_ALCSND, S_ALCPRB, S_ALBLINK, S_ALPLATE, S_NUM };
-enum { P_GENERAL, P_BLE, P_WIFI, P_SUBGHZ, P_SOUND, P_ALERT, P_NUM };
+       S_ALCBLE, S_ALCRF, S_ALCSND, S_ALCPRB, S_ALBLINK, S_ALPLATE,
+       S_EMKEY, S_EMVOL, S_EMLED, S_EMSEC, S_NUM };
+enum { P_GENERAL, P_BLE, P_WIFI, P_SUBGHZ, P_SOUND, P_ALERT, P_EMERG, P_NUM };
 enum { K_ENUM, K_RANGE, K_BOOL, K_INFO };                 // item kind (for the tablet)
 struct SetDef { const char* name; const char* hint; uint8_t page; const char* key; uint8_t kind; int16_t mn, mx, step; const char* unit; };
 static const SetDef DEFS[S_NUM] = {
@@ -92,11 +95,16 @@ static const SetDef DEFS[S_NUM] = {
   { LP("Count IR/NFC", "Учитывать ИК/NFC"), LP("remotes and cards raise activity", "пульты и карты"),P_ALERT,   "al_cprb",    K_BOOL },
   { LP("Blinking", "Мигание"), LP("blink on alerts", "мигать при тревоге"),             P_ALERT,   "al_blink",   K_BOOL },
   { LP("Alert banner", "Плашка тревоги"), LP("show the proximity warning", "показывать плашку тревоги"),      P_ALERT,   "al_plate",   K_BOOL },
+  { LP("IR trigger", "Кнопка ИК"), LP("point remote & press key", "направь пульт и нажми кнопку"), P_EMERG, "em_key", K_INFO },
+  { LP("Sound", "Звук"), LP("siren volume (0 = mute)", "громкость сирены (0 = тихо)"),   P_EMERG,   "em_vol",     K_RANGE, 0, 100, 5, "%" },
+  { LP("LED brightness", "Яркость диодов"), LP("red strobe brightness", "яркость красной вспышки"), P_EMERG, "em_led", K_RANGE, 0, 100, 10, "%" },
+  { LP("Time", "Время"), LP("countdown before shutdown", "время до отключения"),         P_EMERG,   "em_sec",     K_RANGE, 1, 30, 1, "s" },
 };
-static const char* const PAGE_NAMES[P_NUM] = { LP("General", "Общие"), "Bluetooth", "Wi-Fi", "Sub-GHz", LP("Sound", "Звук"), LP("Alerts", "Тревоги") };
-static const char* const PAGE_IDS[P_NUM]   = { "general", "ble", "wifi", "sub", "snd", "alert" };
+static const char* const PAGE_NAMES[P_NUM] = { LP("General", "Общие"), "Bluetooth", "Wi-Fi", "Sub-GHz", LP("Sound", "Звук"), LP("Alerts", "Тревоги"), LP("Emergency", "Экстренное") };
+static const char* const PAGE_IDS[P_NUM]   = { "general", "ble", "wifi", "sub", "snd", "alert", "emerg" };
 static const char* const PAGE_DESCS[P_NUM] = { LP("theme, screen, LEDs, city", "тема, экран, город"), LP("range, LEDs, ticks", "дальность, вспышки"),
-                                               LP("range, ticks", "дальность, тики"), LP("radio band", "диапазон"), LP("source, mic, LEDs", "источник, микрофон"), LP("near, new, levels", "рядом, новые, уровни") };
+                                               LP("range, ticks", "дальность, тики"), LP("radio band", "диапазон"), LP("source, mic, LEDs", "источник, микрофон"), LP("near, new, levels", "рядом, новые, уровни"),
+                                               LP("sound, LEDs, timer", "звук, диоды, время") };
 static const int SET_ROWS = 7;           // rows on screen (list scrolls)
 
 // items of the current page
@@ -159,6 +167,9 @@ void loadSettings() {
   g_alCPrb  = g_prefs.getInt("alcprb", 1) ? 1 : 0;
   g_alBlink = g_prefs.getInt("alblink", 1) ? 1 : 0;
   g_alPlate = g_prefs.getInt("alplate", 1) ? 1 : 0;
+  g_emVol   = constrain(g_prefs.getInt("emvol", 100), 0, 100);
+  g_emLed   = constrain(g_prefs.getInt("emled", 100), 0, 100);
+  g_emSec   = constrain(g_prefs.getInt("emsec", 5), 1, 30);
   g_prefs.end();
   if (g_range < 0 || g_range >= N_RANGES) g_range = 0;
   if (g_thresh < 0 || g_thresh > 30) g_thresh = 7;
@@ -196,6 +207,7 @@ void saveSettings() {
   g_prefs.putInt("alwarn", g_alWarn);   g_prefs.putInt("alalarm", g_alAlarm);
   g_prefs.putInt("alcble", g_alCBle);   g_prefs.putInt("alcrf", g_alCRf);     g_prefs.putInt("alcsnd", g_alCSnd);
   g_prefs.putInt("alcprb", g_alCPrb);   g_prefs.putInt("alblink", g_alBlink); g_prefs.putInt("alplate", g_alPlate);
+  g_prefs.putInt("emvol", g_emVol);     g_prefs.putInt("emled", g_emLed);     g_prefs.putInt("emsec", g_emSec);
   g_prefs.end();
   g_setDirty = false;
 }
@@ -274,6 +286,7 @@ static int getVal(int id) {                               // option index / numb
     case S_ALWARN: return g_alWarn;        case S_ALALARM: return g_alAlarm;
     case S_ALCBLE: return g_alCBle;        case S_ALCRF: return g_alCRf;        case S_ALCSND: return g_alCSnd;
     case S_ALCPRB: return g_alCPrb;        case S_ALBLINK: return g_alBlink;    case S_ALPLATE: return g_alPlate;
+    case S_EMVOL: return g_emVol;          case S_EMLED: return g_emLed;        case S_EMSEC: return g_emSec;
   }
   return 0;
 }
@@ -316,6 +329,9 @@ static bool setVal(int id, int v) {
     case S_ALCPRB:  g_alCPrb = v; break;
     case S_ALBLINK: g_alBlink = v; break;
     case S_ALPLATE: g_alPlate = v; break;
+    case S_EMVOL:   g_emVol = v; if (v > 0) audioSiren(1100, 55, v); break;
+    case S_EMLED:   g_emLed = v; break;
+    case S_EMSEC:   g_emSec = v; break;
     default: return false;
   }
   applyBrightness();
@@ -366,6 +382,7 @@ static void itemJson(int id, String& o) {
       break;
     default:
       if (id == S_VERSION) { if (crumbWasCrash()) snprintf(b, sizeof(b), L("v%s · last reset: %s @ %s", "v%s · сброс: %s @ %s"), FW_VERSION, crumbLastReason(), crumbLastStep()); else snprintf(b, sizeof(b), "v%s", FW_VERSION); }
+      else if (id == S_EMKEY) irEvilLabel(b, sizeof(b));
       else if (g_bat.ok) snprintf(b, sizeof(b), "%d%%  %.2f V", g_bat.soc, g_bat.mv / 1000.0f);
       else snprintf(b, sizeof(b), "%s", L("n/a", "нет"));
       o += ",\"type\":\"info\",\"v\":"; jsonStr(o, b);
@@ -466,7 +483,9 @@ void drawSettings() {
       case S_AUSRC:   optLabel(id, g_auSrc, val, sizeof val); break;
       case S_CITY:    snprintf(val, sizeof(val), "%s", LT(curCity().name)); break;
       case S_VERSION: snprintf(val, sizeof(val), "v%s", FW_VERSION); break;
+      case S_EMKEY:   irEvilLabel(val, sizeof(val)); break;
       case S_ALNEAR: case S_ALNEWFOR: case S_ALWARM: case S_ALSENS: case S_ALWARN: case S_ALALARM:
+      case S_EMVOL: case S_EMLED: case S_EMSEC:
         snprintf(val, sizeof(val), "%d%s%s", getVal(id), DEFS[id].unit[0] && strcmp(DEFS[id].unit, "%") ? " " : "", unitLabel(DEFS[id].unit)); break;
       case S_ALNEW: case S_ALTRK: optLabel(id, getVal(id), val, sizeof(val)); break;
       case S_ALCBLE: case S_ALCRF: case S_ALCSND: case S_ALCPRB: case S_ALBLINK: case S_ALPLATE: strlcpy(val, onOff(getVal(id)), sizeof(val)); break;
@@ -481,7 +500,7 @@ void drawSettings() {
     spr.setTextDatum(MR_DATUM);
     spr.setTextColor(alert ? C_ALERT() : (sel ? C_ACC() : C_HOT()));
     txt(val, W - UI_M - 8, cy, 2);
-    if (sel && id != S_BATTERY && id != S_VERSION) {                 // "turn the wheel" arrow
+    if (sel && id != S_BATTERY && id != S_VERSION && id != S_EMKEY) { // "turn the wheel" arrow
       int vw = txtW(val, 2);
       spr.setTextColor(UI_DIM());
       txt("<", W - UI_M - 16 - vw, cy, 2);
@@ -493,15 +512,15 @@ void drawSettings() {
 
 // ---------- Settings section: page submenu ----------
 static void setSubtitle(char* out, size_t n) { snprintf(out, n, "%s", L("general + sections", "общие и разделы")); }
-static void setEnter() { g_setPage = 0; g_setItem = 0; }
-static void setLeave() { settingsSaveNow(); }
+static void setEnter() { g_setPage = 0; g_setItem = 0; irEvilSetLearn(false); }
+static void setLeave() { irEvilSetLearn(false); settingsSaveNow(); }
 static void setInfo(int i, SubItem& it) {
   it.name = LT(PAGE_NAMES[i]); it.desc = LT(PAGE_DESCS[i]);
   int ids[S_NUM]; sprintf(it.value, "%d", pageItems(i, ids));
 }
 static int  setNow() { return g_setPage; }
-static void setOpen(int p) { g_setPage = p; g_setItem = 0; }
-static void setClose() { settingsSaveNow(); }
+static void setOpen(int p) { g_setPage = p; g_setItem = 0; irEvilSetLearn(p == P_EMERG); }
+static void setClose() { irEvilSetLearn(false); settingsSaveNow(); }
 static void setClick() {
   int ids[S_NUM]; int n = pageItems(g_setPage, ids);
   g_setItem = n ? (g_setItem + 1) % n : 0;

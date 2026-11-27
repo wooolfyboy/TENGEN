@@ -22,13 +22,17 @@ struct Ap {
   const char* vendor;  // vendor by OUI (or nullptr)
   uint32_t t, first;
 };
-struct Sta { uint64_t bssid; uint32_t t; };   // device in a network (count only)
+struct Sta { uint64_t bssid; uint32_t t; uint16_t pkts; };   // device in a network (count + activity)
+struct ProbeSsid { char ssid[25]; uint32_t t; };
+#define PROBE_SSID_MAX 12
 
 extern int  g_wMode;
 extern bool g_wEverScanned, g_scanning, g_prom;
 extern std::map<uint64_t, Ap> g_aps;
 extern std::map<uint64_t, Sta> g_stas;
 extern std::map<uint64_t, uint32_t> g_probes;
+extern ProbeSsid g_probeSsids[PROBE_SSID_MAX];
+extern int       g_nProbeSsids;
 
 // list and details
 extern std::vector<uint64_t> g_wOrder;

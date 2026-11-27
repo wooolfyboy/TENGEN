@@ -237,7 +237,7 @@ static void auUpdate(uint32_t now) {
 // ============================================================
 //  SPEAKER — short sounds (own task, sound queue)
 // ============================================================
-struct Tone { uint16_t hz, ms; uint8_t kind; };       // kind: 0 = tone, 1 = click
+struct Tone { uint16_t hz, ms; uint8_t kind, vol; };   // kind: 0 = tone, 1 = click, 2 = emergency siren
 static QueueHandle_t s_toneQ = nullptr;
 
 static uint16_t volAmp() {
@@ -249,16 +249,23 @@ static void spkTask(void*) {
   Tone t;
   for (;;) {
     if (xQueueReceive(s_toneQ, &t, portMAX_DELAY) != pdTRUE) continue;
-    uint16_t amp = volAmp();
+    uint16_t amp = (t.kind == 2) ? (uint16_t)(constrain((int)t.vol, 0, 100) * 240) : volAmp();
     if (!amp) continue;
     int total = SR * t.ms / 1000, done = 0;
     float ph = 0, dph = 2 * PI * t.hz / SR;
     while (done < total) {
       int n = min(256, total - done);
       for (int i = 0; i < n; i++) {
-        float env = 1.0f - (float)(done + i) / total;    // decay
-        if (t.kind == 1) env *= env * env;                // click: very short decay
-        buf[i] = (int16_t)(sinf(ph) * amp * env);
+        if (t.kind == 2) {
+          // overdriven alarm klaxon: punchy, loud, no decay
+          float s = sinf(ph) * 2.4f;
+          if (s > 1.0f) s = 1.0f; else if (s < -1.0f) s = -1.0f;
+          buf[i] = (int16_t)(s * amp);
+        } else {
+          float env = 1.0f - (float)(done + i) / total;    // decay
+          if (t.kind == 1) env *= env * env;                // click: very short decay
+          buf[i] = (int16_t)(sinf(ph) * amp * env);
+        }
         ph += dph;
       }
       size_t w;
@@ -289,11 +296,16 @@ void audioBegin() {
 
 static void push(uint16_t hz, uint16_t ms, uint8_t kind) {
   if (!s_toneQ || g_sndIdx == 0) return;
-  Tone t = { hz, ms, kind };
+  Tone t = { hz, ms, kind, 0 };
   xQueueSend(s_toneQ, &t, 0);                            // queue full: drop the sound
 }
 void audioClick()                     { if (g_clickEn) push(2600, 6, 1); }
 void audioBeep(uint16_t hz, uint16_t ms) { push(hz, ms, 0); }
+void audioSiren(uint16_t hz, uint16_t ms, int volPct) {
+  if (!s_toneQ || volPct <= 0) return;
+  Tone t = { hz, ms, 2, (uint8_t)constrain(volPct, 0, 100) };
+  xQueueSend(s_toneQ, &t, 0);
+}
 void audioGeiger(int pct) {
   static uint32_t last = 0;
   uint32_t now = millis();

@@ -5,7 +5,7 @@
 const TOUR = [
   { id: 'hq',  sub: 1, dur: 28, title: 'HQ · HOLO 3D' },
   { id: 'hq',  sub: 0, dur: 22, title: 'HQ · COMMAND' },
-  { id: 'ble', sub: 1, dur: 24, title: 'BLUETOOTH · 3D CITY' },
+  { id: 'ble', sub: 0, dur: 24, title: 'BLUETOOTH · 3D SCOPE' },
   { id: 'snd', sub: 1, dur: 22, title: 'SOUND · 3D TERRAIN', when: () => S.snd && S.snd.ok },
   { id: 'wifi', sub: 0, dur: 20, title: 'WI-FI · CHANNELS' },
   { id: 'gal', sub: 5, dur: 24, title: 'GALLERY · GLOBE' },

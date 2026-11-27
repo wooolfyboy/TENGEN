@@ -52,29 +52,25 @@ static void drawPulses(int x, int y, int w, int h, uint32_t now) {
   if (sweep < 1) spr.drawFastVLine(sx, y, h, hot);   // sweep cursor
 }
 
-// idle: the remote on the left sends waves into the receiver's "eye"
+// idle: meditative Tengen receiver Eye with inward-converging 38 kHz waves
 static void drawIdle(uint32_t now) {
-  int W = spr.width();
-  int cy = 76, rx = W / 2 + 70;
-  uint16_t acc = C_ACC();
-  iconRemote(W / 2 - 90, cy + 6, UI_LABEL(), C_BG());
-  for (int i = 0; i < 4; i++) {                              // waves travel to the receiver
-    float ph = fmodf(now / 900.0f + i / 4.0f, 1.0f);
-    int x = W / 2 - 70 + (int)(ph * 120);
-    int r = 10 + (int)(ph * 6);
-    uint16_t c = scale565(acc, (int)(100 * (1 - ph * 0.8f)));
-    spr.drawArc(x, cy, r, r - 2, 225, 315, c, C_BG(), true);
+  int W = spr.width(), cx = W / 2, cy = 72;
+  uint16_t acc = C_ACC(), line = UI_LINE();
+  spr.drawArc(cx, cy, 30, 28, 25, 335, scale565(acc, 65), C_BG(), true);
+  spr.drawFastHLine(cx - 38, cy, 5, line); spr.drawFastHLine(cx + 34, cy, 5, line);
+  spr.drawFastVLine(cx, cy - 36, 5, line); spr.drawFastVLine(cx, cy + 32, 5, line);
+  for (int i = 0; i < 3; i++) {
+    float ph = fmodf(now / 1500.0f + i / 3.0f, 1.0f);
+    int r = 8 + (int)((1.0f - ph) * 20);
+    uint16_t c = scale565(acc, (int)(85 * sinf(ph * PI)));
+    spr.drawCircle(cx, cy, r, c);
   }
-  // receiver: a dome; flashes when a wave arrives
-  float pulse = fmodf(now / 900.0f, 0.25f) * 4;
-  spr.fillSmoothCircle(rx, cy, 13, scale565(acc, 25 + (int)(pulse * 25)), C_BG());
-  spr.drawSmoothCircle(rx, cy, 13, acc, C_BG());
-  spr.fillSmoothCircle(rx, cy, 5, C_HOT(), C_BG());
+  drawMarker(cx, cy, C_HOT(), false);
   spr.setTextDatum(MC_DATUM);
-  spr.setTextColor(UI_LABEL());
-  txt(L("POINT ANY REMOTE AT TENGEN", "НАПРАВЬТЕ ПУЛЬТ НА TENGEN"), W / 2, 118, 1);
+  spr.setTextColor(C_HOT());
+  txt(L("POINT ANY REMOTE AT TENGEN", "НАПРАВЬТЕ ПУЛЬТ НА TENGEN"), cx, 118, 1);
   spr.setTextColor(UI_DIM());
-  txt(L("PRESS A BUTTON TO SEE WHOSE REMOTE IT IS", "НАЖМИТЕ КНОПКУ - УЗНАЕМ, ЧЕЙ ЭТО ПУЛЬТ"), W / 2, 132, 1);
+  txt(L("PRESS A BUTTON TO SEE WHOSE REMOTE IT IS", "НАЖМИТЕ КНОПКУ - УЗНАЕМ, ЧЕЙ ЭТО ПУЛЬТ"), cx, 132, 1);
 }
 
 void drawIr(uint32_t now) {

@@ -40,13 +40,15 @@ void uiHeader(const char* title, const char* right, bool rightAlert) {
     txt(r, W - UI_M - 4, 6, 1);
   }
   if (themeKurenai()) { spr.fillRect(UI_M, 19, W - 2 * UI_M, 2, C_ACC()); return; }   // KURENAI: solid red line
-  // line under the header, fading to the right (16 fast horizontal segments instead of 304 pixel calls)
+  // line under the header, fading to the right + origin diamond & terminal tick
   uint16_t a = C_ACC();
   int span = W - 2 * UI_M;
   for (int s = 0; s < 16; s++) {
     int x0 = UI_M + s * span / 16, x1 = UI_M + (s + 1) * span / 16;
     spr.drawFastHLine(x0, 19, x1 - x0, scale565(a, 100 - s * 85 / 15));
   }
+  spr.fillRect(UI_M, 18, 3, 3, rightAlert ? C_ALERT() : a);
+  spr.drawFastVLine(W - UI_M - 1, 17, 5, rightAlert ? C_ALERT() : scale565(a, 55));
 }
 
 void uiFooter(const char* left, const char* right) {
@@ -79,15 +81,21 @@ void uiReadout(int x, int y, const char* label, const char* value, uint16_t valC
 }
 
 void uiEmpty(const char* msg, const char* sub) {
-  int W = spr.width();
-  char m[40]; upper(msg, m, sizeof(m));
+  int W = spr.width(), cx = W / 2, cy = 62;
+  uint16_t acc = C_ACC(), line = UI_LINE();
+  // Calm Zen Ensō incomplete ring + cardinal ticks (static: zero SPI row churn when idle!)
+  spr.drawArc(cx, cy, 20, 18, 30, 325, scale565(acc, 70), C_BG(), true);
+  spr.drawFastHLine(cx - 26, cy, 4, line); spr.drawFastHLine(cx + 23, cy, 4, line);
+  spr.drawFastVLine(cx, cy - 26, 4, line); spr.drawFastVLine(cx, cy + 23, 4, line);
+  drawMarker(cx, cy, acc, false);
+  char m[44]; upper(msg, m, sizeof(m));
   spr.setTextDatum(MC_DATUM);
-  spr.setTextColor(UI_LABEL());
-  txt(m, W / 2, 80, 4);
+  spr.setTextColor(C_HOT());
+  txt(m, cx, 102, txtW(m, 4) <= W - 24 ? 4 : 2);
   if (sub) {
-    char s[60]; upper(sub, s, sizeof(s));
+    char s[64]; upper(sub, s, sizeof(s));
     spr.setTextColor(UI_DIM());
-    txt(s, W / 2, 104, 1);
+    txt(s, cx, 124, txtW(s, 1) <= W - 16 ? 1 : 8);
   }
 }
 

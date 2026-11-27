@@ -122,17 +122,29 @@ static const char* encStr(wifi_auth_mode_t e) {
 // for ~90 ms; a full round takes ~20 s; results are kept and expire after NET_FORGET_MS.
 #define NET_MAX 64
 static const uint32_t SCAN_STEP_MS = 1500, NET_FORGET_MS = 60000;
-struct NetRec { uint8_t b[6]; char ssid[33]; int8_t r; uint8_t ch, enc; uint32_t t; };
+struct NetRec { uint8_t b[6]; char ssid[33]; int8_t r; uint8_t ch, enc, gen, wps; int8_t sec; bool hs; uint32_t t; };
 static NetRec   s_nets[NET_MAX];
 static int      s_nNets = 0;
 static uint8_t  s_scanCh = 1;
+
+static bool webLooksHotspot(const char* ssid, const char* vendor) {
+  char low[33]; size_t i = 0;
+  for (; i < 32 && ssid[i]; i++) low[i] = (char)tolower((unsigned char)ssid[i]);
+  low[i] = 0;
+  static const char* const kw[] = { "iphone", "ipad", "androidap", "android", "galaxy", "redmi",
+    "poco", "honor", "realme", "oneplus", "pixel", "hotspot", "huawei", "xiaomi", "nothing", "moto ", nullptr };
+  for (int k = 0; kw[k]; k++) if (strstr(low, kw[k])) return true;
+  if (vendor && (!strncmp(vendor, "Apple", 5) || !strncmp(vendor, "Samsung", 7) ||
+                 !strncmp(vendor, "Xiaomi", 6) || !strncmp(vendor, "OnePlus", 7))) return true;
+  return false;
+}
 
 static void netsJson() {
   uint32_t now = millis();
   int w = 0;                                       // drop long-unheard networks
   for (int i = 0; i < s_nNets; i++) if (now - s_nets[i].t < NET_FORGET_MS) s_nets[w++] = s_nets[i];
   s_nNets = w;
-  String o; o.reserve(64 + s_nNets * 90);
+  String o; o.reserve(64 + s_nNets * 120);
   o += "{\"scanned\":true,\"nets\":[";
   for (int i = 0; i < s_nNets; i++) {
     const NetRec& n = s_nets[i];
@@ -144,7 +156,12 @@ static void netsJson() {
     o += ",\"v\":"; jsonStr(o, v ? v : "");
     o += ",\"r\":"; o += n.r;
     o += ",\"c\":"; o += n.ch;
-    o += ",\"e\":\""; o += encStr((wifi_auth_mode_t)n.enc); o += "\"}";
+    o += ",\"e\":\""; o += encStr((wifi_auth_mode_t)n.enc); o += '"';
+    if (n.gen) { o += ",\"g\":"; o += n.gen; }
+    if (n.sec) { o += ",\"w\":40"; }
+    if (n.hs)  { o += ",\"hs\":1"; }
+    if (n.wps) { o += ",\"wps\":1"; }
+    o += '}';
   }
   o += "]}";
   s_wifiJson = o;
@@ -158,13 +175,25 @@ static void scanCollect() {
   if (n < 0) return;                              // still running (or never started)
   uint32_t now = millis();
   for (int i = 0; i < n; i++) {
-    uint8_t* b = WiFi.BSSID(i);
+    wifi_ap_record_t* rec = (wifi_ap_record_t*)WiFi.getScanInfoByIndex(i);
+    uint8_t* b = rec ? rec->bssid : WiFi.BSSID(i);
+    if (!b) continue;
     int k = 0;
     while (k < s_nNets && memcmp(s_nets[k].b, b, 6)) k++;
-    if (k == s_nNets) { if (s_nNets >= NET_MAX) continue; s_nNets++; memcpy(s_nets[k].b, b, 6); }
+    if (k == s_nNets) { if (s_nNets >= NET_MAX) continue; memset(&s_nets[k], 0, sizeof(NetRec)); s_nNets++; memcpy(s_nets[k].b, b, 6); }
     NetRec& r = s_nets[k];
-    strlcpy(r.ssid, WiFi.SSID(i).c_str(), sizeof(r.ssid));
-    r.r = WiFi.RSSI(i); r.ch = WiFi.channel(i); r.enc = (uint8_t)WiFi.encryptionType(i); r.t = now;
+    if (rec) {
+      strncpy(r.ssid, (const char*)rec->ssid, 32); r.ssid[32] = 0;
+      r.r = rec->rssi; r.ch = rec->primary; r.enc = (uint8_t)rec->authmode;
+      r.gen = rec->phy_11ax ? 6 : rec->phy_11n ? 4 : rec->phy_11g ? 3 : 1;
+      r.sec = rec->second == WIFI_SECOND_CHAN_ABOVE ? 1 : rec->second == WIFI_SECOND_CHAN_BELOW ? -1 : 0;
+      r.wps = rec->wps ? 1 : 0;
+    } else {
+      strlcpy(r.ssid, WiFi.SSID(i).c_str(), sizeof(r.ssid));
+      r.r = WiFi.RSSI(i); r.ch = WiFi.channel(i); r.enc = (uint8_t)WiFi.encryptionType(i);
+    }
+    r.hs = webLooksHotspot(r.ssid, ouiName(r.b));
+    r.t = now;
   }
   WiFi.scanDelete();
   netsJson();

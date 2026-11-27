@@ -12,6 +12,7 @@
 #include "core/jsonutil.h"
 #include "core/crumb.h"
 #include "core/timeutil.h"
+#include "core/leds.h"
 
 #define PN_ADDR  0x24
 #define PN_RST   45                   // BOARD_PN532_RF_REST: LOW = PN532 asleep
@@ -191,6 +192,7 @@ static void gotTarget(const uint8_t* d, int n, bool felica, uint32_t now) {
   crumb("nfc card");
   if (felica) nfcClassify(c, -1); else inspectA(c);
   nfcCommit(c, millis());
+  ledsEvent(2);
 }
 
 void nfcTick(uint32_t now) {

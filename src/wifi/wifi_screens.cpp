@@ -171,22 +171,24 @@ void drawNetDetail(uint32_t now) {
 }
 
 // ============================================================
-//  CHANNELS — who occupies which channel
+//  CHANNELS — Sculpted Topographic Spectral Mountains (2.4 GHz)
 // ============================================================
 void drawChannels(uint32_t now) {
   int W = spr.width();
   char buf[40];
   spr.fillSprite(C_BG());
   int best = bestChannel();
-  if (best) snprintf(buf, sizeof(buf), L("best channel %d", "лучший канал %d"), best); else buf[0] = 0;
+  if (best) snprintf(buf, sizeof(buf), L("best ch %d  ·  %d APs", "лучший к%d  ·  %d сет."), best, (int)g_aps.size());
+  else buf[0] = 0;
   uiHeader(L("Channels", "Каналы"), buf);
   scanDot();
   if (waiting()) { present(); return; }
 
-  int pl = UI_M + 24, pr = W - UI_M - 8, pt = UI_TOP + 4, pb = UI_BOTTOM - 4;
+  int pl = UI_M + 24, pr = W - UI_M - 8, pt = UI_TOP + 4, pb = UI_BOTTOM - 6;
   auto chX = [&](float ch) { return pl + (int)((ch - 1) * (pr - pl) / (CH_MAX - 1)); };
   auto dbY = [&](int db) { int c = constrain(db, -100, -30); return pb - (c + 100) * (pb - pt) / 70; };
 
+  // Horizontal dBm grid + non-overlapping 1 / 6 / 11 vertical axes
   for (int db = -90; db <= -40; db += 10) {
     int y = dbY(db);
     for (int x = pl; x < pr; x += 4) spr.drawPixel(x, y, UI_LINE());
@@ -195,46 +197,77 @@ void drawChannels(uint32_t now) {
     spr.setTextColor(UI_DIM());
     txt(buf, pl - 4, y, 1);
   }
-  spr.drawFastHLine(pl, pb, pr - pl, UI_LABEL());
-  for (int c = 1; c <= CH_MAX; c++) {
-    bool main3 = (c == 1 || c == 6 || c == 11);
-    spr.drawFastVLine(chX(c), pb, 3, main3 ? UI_LABEL() : UI_LINE());
-    snprintf(buf, sizeof(buf), "%d", c);
-    spr.setTextDatum(TC_DATUM);
-    spr.setTextColor(c == best ? C_ACC() : main3 ? UI_LABEL() : UI_DIM());
-    txt(buf, chX(c), pb + 5, 1);
+  for (int c : {1, 6, 11}) {
+    int x = chX(c);
+    for (int y = pt; y < pb; y += 3) spr.drawPixel(x, y, c == best ? scale565(C_ACC(), 55) : UI_LINE());
   }
-  if (best) spr.fillTriangle(chX(best), pb + 14, chX(best) - 4, pb + 19, chX(best) + 4, pb + 19, C_ACC());
+  // Sacred Optimal Channel Beacon on best channel
+  if (best) {
+    int bx = chX(best);
+    spr.fillRect(bx - 1, pt, 3, pb - pt, scale565(C_ACC(), 14));
+    spr.fillTriangle(bx, pt + 5, bx - 3, pt, bx + 3, pt, C_ACC());
+  }
 
-  // humps of real width (20 / 40 MHz), weak ones at the bottom, heat = strength
-  static std::vector<std::pair<int, uint64_t>> v;      // static: no allocation every frame
+  // Spectral mountains of true width (20 / 40 MHz) with vertical harmonic ribs
+  static std::vector<std::pair<int, uint64_t>> v;
   v.clear();
   for (auto& kv : g_aps) if (kv.second.ch >= 1 && kv.second.ch <= CH_MAX) v.push_back({ kv.second.rssi, kv.first });
   std::sort(v.begin(), v.end());
   for (auto& p : v) {
     const Ap& a = g_aps[p.second];
-    uint16_t c = heat(a.rssi), fill = scale565(c, 18);
+    bool open = secAlert(a.enc);
+    uint16_t c = open ? C_ALERT() : heat(a.rssi);
+    uint16_t fill = scale565(c, 15), rib = scale565(c, 46);
     int top = dbY(a.rssi);
     float cen = apCenter(a), half = apHalf(a);
+    int xL = constrain(chX(cen - half), pl, pr), xR = constrain(chX(cen + half), pl, pr);
+    int halfPx = max(1, (xR - xL) / 2), cxPx = chX(cen);
     int prevx = -1, prevy = -1;
-    for (int s = 0; s <= 24; s++) {
-      float f = -1.0f + s / 12.0f;
-      int x = chX(cen + f * half);
-      int y = pb - (int)((pb - top) * (1.0f - f * f));
-      if (x < pl || x > pr) { prevx = -1; continue; }
-      if (y < pb) spr.drawFastVLine(x, y, pb - y, fill);
-      if (prevx >= 0) spr.drawLine(prevx, prevy, x, y, c);
+    for (int x = xL; x <= xR; x++) {
+      float f = constrain((float)(x - cxPx) / (float)halfPx, -1.0f, 1.0f);
+      float bell = cosf(f * PI * 0.5f);
+      bell *= bell;
+      int y = pb - (int)((pb - top) * bell);
+      if (y < pb) {
+        spr.drawFastVLine(x, y, pb - y, ((x - cxPx) % 4 == 0) ? rib : fill);
+      }
+      if (prevx >= 0) {
+        spr.drawLine(prevx, prevy, x, y, c);
+        if (y + 1 < pb) spr.drawPixel(x, y + 1, scale565(c, 65));
+      }
       prevx = x; prevy = y;
     }
+    if (cxPx >= pl && cxPx <= pr) spr.fillRect(cxPx - 1, top - 1, 3, 3, open ? C_ALERT() : C_HOT());
   }
-  for (int i = (int)v.size() - 1, k = 0; i >= 0 && k < 3; i--, k++) {     // labels of the three strongest
+
+  spr.drawFastHLine(pl, pb, pr - pl, C_ACC());
+  for (int c = 1; c <= CH_MAX; c++) {
+    bool main3 = (c == 1 || c == 6 || c == 11);
+    int x = chX(c);
+    spr.drawFastVLine(x, pb, main3 ? 4 : 2, c == best ? C_HOT() : main3 ? C_ACC() : UI_LINE());
+    snprintf(buf, sizeof(buf), "%d", c);
+    spr.setTextDatum(TC_DATUM);
+    spr.setTextColor(c == best ? C_HOT() : main3 ? C_ACC() : UI_DIM());
+    txt(buf, x, pb + 5, 1);
+  }
+  if (best) spr.fillTriangle(chX(best), pb + 14, chX(best) - 4, pb + 19, chX(best) + 4, pb + 19, C_ACC());
+
+  // Non-overlapping peak callouts for top 3 strongest APs
+  int lxUsed[3] = {-999, -999, -999}, lyUsed[3] = {0, 0, 0}, nUsed = 0;
+  for (int i = (int)v.size() - 1; i >= 0 && nUsed < 3; i--) {
     const Ap& a = g_aps[v[i].second];
     char nm[20], nu[20];
-    fitText(ssidOr(a), nm, sizeof(nm), 72, 1);
+    fitText(ssidOr(a), nm, sizeof(nm), 68, 1);
     upperCopy(nm, nu, sizeof(nu));
+    int px = constrain(chX(apCenter(a)), pl + 28, pr - 28);
+    int py = max(pt + 8, dbY(a.rssi) - 4);
+    for (int j = 0; j < nUsed; j++) {
+      if (abs(px - lxUsed[j]) < 56 && abs(py - lyUsed[j]) < 10) py = max(pt + 8, lyUsed[j] - 10);
+    }
+    lxUsed[nUsed] = px; lyUsed[nUsed] = py; nUsed++;
     spr.setTextDatum(BC_DATUM);
-    spr.setTextColor(C_HOT());
-    txt(nu, constrain(chX(apCenter(a)), pl + 30, pr - 30), dbY(a.rssi) - 2, 1);
+    spr.setTextColor(secAlert(a.enc) ? C_ALERT() : C_HOT());
+    txt(nu, px, py, 1);
   }
   present();
 }
@@ -357,15 +390,34 @@ void drawClients(uint32_t now) {
     spr.setTextColor(C_HOT());
     txtNum(cnt, W - UI_M - 8, cy, 2);
   }
-  // "looking for Wi-Fi"
+  // "looking for Wi-Fi" + recently probed SSIDs
   int y = UI_TOP + 2 + rows * rh + 4;
   spr.drawFastHLine(UI_M + 8, y, W - 2 * UI_M - 16, UI_LINE());
   snprintf(buf, sizeof(buf), "%d", (int)g_probes.size());
   uiReadout(UI_M + 8, y + 4, L("looking for Wi-Fi", "ищут Wi-Fi"), buf, C_ACC(), 2);
   spr.setTextDatum(TR_DATUM);
-  spr.setTextColor(UI_DIM());
-  txt(L("LAST 2 MIN, APPROXIMATE:", "ЗА 2 МИН, ПРИМЕРНО:"), W - UI_M - 8, y + 6, 1);
-  txt(L("PHONES CHANGE ADDRESSES", "ТЕЛЕФОНЫ МЕНЯЮТ АДРЕСА"), W - UI_M - 8, y + 16, 1);
+  if (g_nProbeSsids > 0) {
+    char ps[80]; int p = 0; ps[0] = 0;
+    for (int i = g_nProbeSsids - 1; i >= 0 && p < 50; i--) {
+      if (msSince(now, g_probeSsids[i].t) > 120000) continue;
+      p += snprintf(ps + p, sizeof(ps) - p, "%s%s", p ? ", " : "", g_probeSsids[i].ssid);
+    }
+    if (ps[0]) {
+      spr.setTextColor(UI_DIM());
+      txt(L("SEARCHING FOR:", "ИЩУТ СЕТИ:"), W - UI_M - 8, y + 6, 1);
+      fitText(ps, buf, sizeof(buf), 175, 1);
+      spr.setTextColor(C_ACC());
+      txt(buf, W - UI_M - 8, y + 16, 1);
+    } else {
+      spr.setTextColor(UI_DIM());
+      txt(L("LAST 2 MIN, APPROXIMATE:", "ЗА 2 МИН, ПРИМЕРНО:"), W - UI_M - 8, y + 6, 1);
+      txt(L("PHONES CHANGE ADDRESSES", "ТЕЛЕФОНЫ МЕНЯЮТ АДРЕСА"), W - UI_M - 8, y + 16, 1);
+    }
+  } else {
+    spr.setTextColor(UI_DIM());
+    txt(L("LAST 2 MIN, APPROXIMATE:", "ЗА 2 МИН, ПРИМЕРНО:"), W - UI_M - 8, y + 6, 1);
+    txt(L("PHONES CHANGE ADDRESSES", "ТЕЛЕФОНЫ МЕНЯЮТ АДРЕСА"), W - UI_M - 8, y + 16, 1);
+  }
   present();
 }
 

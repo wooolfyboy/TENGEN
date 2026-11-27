@@ -79,7 +79,7 @@ jobs:
           check dist/tengen_firmware_ota.bin 2830000    # OTA firmware: 2.69 MB on v2.0-test5
           check dist/flash_tengen.html      4150000    # installer: 3.94 MB
           gz=$(python3 -c "import re;t=open('src/web/tablet_page.h').read();print(len(re.findall(r'0x[0-9a-fA-F]{2}',t)))")
-          echo "tablet page (gzip): $gz / 231000 bytes"; [ "$gz" -le 231000 ] || { echo "::error::tablet page is over budget ($gz > 231000)"; fail=1; }
+          echo "tablet page (gzip): $gz / 245000 bytes"; [ "$gz" -le 245000 ] || { echo "::error::tablet page is over budget ($gz > 245000)"; fail=1; }
           exit $fail
 
       - uses: actions/upload-artifact@v5

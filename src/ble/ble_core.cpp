@@ -62,8 +62,8 @@ static uint32_t g_detFor = 0;
 
 static bool bleIs(int m) { return navActive(&bleSection) && g_mode == m; }
 
-// copy parsed advertisement fields into the address record
-static void fillAdv(Dev& v, const AdvInfo& ai) {
+// copy parsed advertisement fields + decoded intelligence into the address record
+static void fillAdv(Dev& v, const AdvInfo& ai, const BleIntel& bi) {
   if (ai.nameLen && !v.name[0]) {
     strncpy(v.name, ai.name, sizeof(v.name) - 1); v.name[sizeof(v.name) - 1] = 0;
   }
@@ -77,6 +77,15 @@ static void fillAdv(Dev& v, const AdvInfo& ai) {
     for (uint8_t k = 0; k < v.nU; k++) if (v.uuids[k] == ai.uuids[i]) have = true;
     if (!have && v.nU < 4) v.uuids[v.nU++] = ai.uuids[i];
   }
+  if (bi.txPwr != 127) { v.txPwr = bi.txPwr; v.flags |= DF_HAS_TX; }
+  if (bi.bat  != 255) v.bat  = bi.bat;
+  if (bi.batL != 255) v.batL = bi.batL;
+  if (bi.batR != 255) v.batR = bi.batR;
+  if (bi.batC != 255) v.batC = bi.batC;
+  if (bi.model[0]) strlcpy(v.model, bi.model, sizeof(v.model));
+  if (bi.state[0]) strlcpy(v.state, bi.state, sizeof(v.state));
+  v.flags |= (bi.flags & ~(DF_ACTIVE | DF_MOVING));
+  if (bi.flags & DF_ACTIVE) v.flags |= DF_ACTIVE;
 }
 
 // ---------- scanner callback (NimBLE 2.x) ----------
@@ -90,6 +99,8 @@ class ScanCB : public NimBLEScanCallbacks {
     AdvInfo ai;
     const std::vector<uint8_t>& pl = d->getPayload();
     parseAdv(pl.data(), pl.size(), ai);
+    BleIntel bi;
+    decodeIntel(ai, bi);
     SensorReading sr;
     bool isSensor = parseSensor(pl.data(), pl.size(), sr);
     Vend     vend = resolveVendor(ai);
@@ -113,27 +124,48 @@ class ScanCB : public NimBLEScanCallbacks {
       Dev& v = it->second;
       v.t = now; v.rssi = rssi; v.pkts++;
       v.rssiS = (int8_t)((v.rssiS * 3 + rssi) / 4);
-      // Anti-multipath sub-dB float tracker: fast on clean peaks, gentle on single-channel reflection dips
+      // Anti-multipath sub-dB float tracker + RSSI jitter estimator for motion detection
       {
         float m = (float)rssi;
+        float diff = fabsf(m - v.rssiF);
+        v.rssiJit = v.rssiJit * 0.82f + diff * 0.18f;
         float a = (m >= v.rssiF) ? 0.38f : (m < v.rssiF - 7.0f ? 0.08f : 0.22f);
         v.rssiF += (m - v.rssiF) * a;
       }
+      // Rolling 4s packet-rate tracker for Active / Sleeping detection
+      if (!v.rateMs) { v.rateMs = now; v.rateCnt = 1; }
+      else {
+        v.rateCnt++;
+        uint32_t dt = msSince(now, v.rateMs);
+        if (dt >= 4000) {
+          uint32_t p10 = (uint32_t)v.rateCnt * 10000UL / dt;
+          v.pps10 = (uint8_t)(p10 > 250 ? 250 : p10);
+          v.rateMs = now;
+          v.rateCnt = 0;
+        }
+      }
+      if (v.pps10 >= 25 || (bi.flags & DF_ACTIVE)) v.flags |= DF_ACTIVE;
+      else if (v.pps10 > 0 && v.pps10 <= 8 && !(bi.flags & DF_ACTIVE)) v.flags &= ~DF_ACTIVE;
+      if (v.rssiJit >= 2.6f && v.pkts >= 6) v.flags |= DF_MOVING;
+      else if (v.rssiJit <= 1.5f) v.flags &= ~DF_MOVING;
+
       if (rssi < v.rmin) v.rmin = rssi;
       if (rssi > v.rmax) v.rmax = rssi;
       if (vend.score > v.vscore) { v.cat = vend.cat; v.vkind = vend.kind; v.vcode = vend.code; v.vscore = vend.score; }
       if (type != T_UNKNOWN) v.type = type;
       if (!v.sig) v.sig = sig;
-      fillAdv(v, ai);
+      fillAdv(v, ai, bi);
     } else if (g_seen.size() < MAX_DEVS) {
       Dev nd; memset(&nd, 0, sizeof(nd));
       nd.t = now; nd.first = now; nd.sig = sig; nd.pkts = 1;
       nd.rssi = nd.rssiS = nd.rmin = nd.rmax = (int8_t)rssi;
       nd.rssiF = (float)rssi;
+      nd.txPwr = 127; nd.bat = nd.batL = nd.batR = nd.batC = 255;
+      nd.rateMs = now; nd.rateCnt = 1;
       nd.cat = vend.cat; nd.vkind = vend.kind; nd.vcode = vend.code; nd.vscore = vend.score;
       nd.type = type; nd.akind = akind; nd.rnd = rnd;
       memcpy(nd.mac, mac, 6);
-      fillAdv(nd, ai);
+      fillAdv(nd, ai, bi);
       // look for a "predecessor": same fingerprint, recently went silent
       if (rnd && sig) {
         Dev* best = nullptr; int bestDiff = MERGE_DB + 1;
@@ -157,6 +189,13 @@ class ScanCB : public NimBLEScanCallbacks {
             nd.cat = best->cat; nd.vkind = best->vkind; nd.vcode = best->vcode; nd.vscore = best->vscore;
           }
           if (!nd.name[0]) memcpy(nd.name, best->name, sizeof(nd.name));
+          if (nd.txPwr == 127 && best->txPwr != 127) { nd.txPwr = best->txPwr; nd.flags |= DF_HAS_TX; }
+          if (nd.bat  == 255) nd.bat  = best->bat;
+          if (nd.batL == 255) nd.batL = best->batL;
+          if (nd.batR == 255) nd.batR = best->batR;
+          if (nd.batC == 255) nd.batC = best->batC;
+          if (!nd.model[0] && best->model[0]) strlcpy(nd.model, best->model, sizeof(nd.model));
+          if (!nd.state[0] && best->state[0]) strlcpy(nd.state, best->state, sizeof(nd.state));
         }
       }
       if (!nd.ent) nd.ent = ++g_nextEnt;
@@ -179,6 +218,10 @@ class ScanCB : public NimBLEScanCallbacks {
         if (sr.hasB)   { S.r.batt = sr.batt;   S.r.hasB = true; }
         if (sr.hasP)   { S.r.press = sr.press; S.r.hasP = true; }
         if (sr.hasCO2) { S.r.co2 = sr.co2;     S.r.hasCO2 = true; }
+        if (sr.hasDoor)   { S.r.doorOpen = sr.doorOpen; S.r.hasDoor = true; }
+        if (sr.hasMotion) { S.r.motion   = sr.motion;   S.r.hasMotion = true; }
+        if (sr.hasLeak)   { S.r.leak     = sr.leak;     S.r.hasLeak = true; }
+        if (sr.hasLux)    { S.r.lux      = sr.lux;      S.r.hasLux = true; }
         S.r.model = sr.model;
         if (ai.nameLen && !S.name[0]) {
           strncpy(S.name, ai.name, sizeof(S.name) - 1); S.name[sizeof(S.name) - 1] = 0;
@@ -348,6 +391,7 @@ void bleUpdate(uint32_t now) {
     else if (d.inRange && d.rssiS < thr - RANGE_HYST_DB) d.inRange = false;
     if (!d.inRange || d.pkts < MIN_PKTS) { ++it; continue; }
     Ent& e = g_ents[d.ent];           // a new Ent is created zeroed
+    if (e.t == 0) { e.txPwr = 127; e.bat = e.batL = e.batR = e.batC = 255; }
     if (d.t >= e.t) { e.t = d.t; e.rssi = d.rssi; e.rssiS = d.rssiS; e.key = it->first; }
     if (!e.first || d.first < e.first) e.first = d.first;
     if (d.pkts > e.pkts) e.pkts = d.pkts;
@@ -356,6 +400,15 @@ void bleUpdate(uint32_t now) {
     if (d.vscore > e.vscore) { e.cat = d.cat; e.vkind = d.vkind; e.vcode = d.vcode; e.vscore = d.vscore; }
     if (d.name[0] && !e.name[0]) memcpy(e.name, d.name, sizeof(e.name));
     if (g_nLabels > 0 && !e.label[0]) { const char* l = labelFor(d.mac); if (l) strlcpy(e.label, l, sizeof(e.label)); }
+    e.flags |= d.flags;
+    if (d.txPwr != 127) e.txPwr = d.txPwr;
+    if (d.bat  != 255) e.bat  = d.bat;
+    if (d.batL != 255) e.batL = d.batL;
+    if (d.batR != 255) e.batR = d.batR;
+    if (d.batC != 255) e.batC = d.batC;
+    if (d.pps10 > e.pps10) e.pps10 = d.pps10;
+    if (d.model[0] && !e.model[0]) strlcpy(e.model, d.model, sizeof(e.model));
+    if (d.state[0] && !e.state[0]) strlcpy(e.state, d.state, sizeof(e.state));
     if (wantDetail && d.ent == g_sel && d.t >= detT) { g_detDev = d; detT = d.t; g_detValid = true; }
     ++it;
   }
@@ -381,7 +434,7 @@ void bleUpdate(uint32_t now) {
 
   g_have = false; g_bestRssi = -127; memset(&g_bestEnt, 0, sizeof(g_bestEnt));
   memset(g_typeCnt, 0, sizeof(g_typeCnt));
-  bool wantScope = bleIs(M_SCOPE) || bleIs(M_CITY);
+  bool wantScope = bleIs(M_SCOPE);
   auto prevBest = g_ents.find(g_bestId);
   int prevR = prevBest != g_ents.end() ? prevBest->second.rssi + BEST_HYST_DB : -127;
   if (prevBest != g_ents.end()) { g_bestRssi = prevR; g_bestEnt = prevBest->second; g_have = true; }
@@ -476,12 +529,12 @@ static void bleEnter() { wifiRadioOff(); bleRadioOn(); }
 static void bleLeave() { bleRadioOff(); ledsOff(); }   // left: radio and feed off
 
 static void bleScreenInfo(int i, SubItem& it) {
-  const char* const names[NUM_MODES] = { L("Overview", "Обзор"), L("Scope", "Радар"), L("City", "Город"), L("Nearest", "Ближайшее"), L("Devices", "Устройства"), L("Weather", "Погода") };
-  const char* const descs[NUM_MODES] = { L("count, trend, types", "число, тренд, типы"), L("radar picture", "картина вокруг"), L("3D: devices as towers", "3D: башни-устройства"), L("closest device", "самое близкое"),
-    L("list + details", "список и подробности"), L("BLE thermometers", "BLE-термометры") };
+  const char* const names[NUM_MODES] = { L("Overview", "Обзор"), L("Scope", "Радар"), L("Nearest", "Ближайшее"), L("Devices", "Устройства"), L("Weather", "Погода") };
+  const char* const descs[NUM_MODES] = { L("count, trend, types", "число, тренд, типы"), L("AT-radar & contacts", "радар и эфир вокруг"), L("closest device", "самое близкое"),
+    L("list + dossier", "список и досье"), L("BLE thermometers", "BLE-термометры") };
   it.name = names[i]; it.desc = descs[i]; it.value[0] = 0;
   switch (i) {
-    case M_OVERVIEW: case M_LIST: case M_CITY: sprintf(it.value, "%d", g_lastCount); break;
+    case M_OVERVIEW: case M_LIST: sprintf(it.value, "%d", g_lastCount); break;
     case M_SCOPE: {
       int top = -1;
       for (int t = 1; t < T_NUM; t++) if (g_typeCnt[t] > 0 && (top < 0 || g_typeCnt[t] > g_typeCnt[top])) top = t;
@@ -501,13 +554,11 @@ static void bleOpen(int m) { g_mode = m; g_detail = false; }
 static void bleClose() { g_detail = false; }
 
 static void bleClick() {
-  if (g_mode == M_LIST) { g_detail = !g_detail; g_lastTouch = millis(); }
-  // other screens have no press action (back = side button)
+  if (g_mode == M_LIST) { g_detail = !g_detail; g_lastTouch = millis(); return; }
 }
 static void bleRotate(int dir) {
   static uint32_t last = 0;
   if (g_mode == M_LIST) { g_listMove += dir; g_lastTouch = millis(); return; }
-  if (g_mode == M_CITY) { cityTurn(dir); return; }   // in City the wheel turns the camera
   if (millis() - last < 120) return;               // so screens do not flip by on fast spinning
   last = millis();
   g_mode = (g_mode + dir + NUM_MODES) % NUM_MODES;
@@ -521,7 +572,6 @@ static void bleDraw(uint32_t now) {
   switch (g_mode) {
     case M_OVERVIEW: drawOverview(g_lastCount, g_lastRaw, g_typeCnt); break;
     case M_SCOPE:    drawScope(g_snap); break;
-    case M_CITY:     drawCity(g_snap, now); break;
     case M_NEAREST:  drawNearest(g_have, g_bestRssi, g_bestEnt, g_lastCount); break;
     case M_LIST:     drawListOrDetail(now); break;
     default:         drawWeather(g_sensSnap, now); break;
@@ -535,6 +585,24 @@ const Section bleSection = {
   bleClick, bleRotate, bleBack, nullptr, bleDraw,
 };
 
+// Compact human-readable intelligence tag for stream/UI (guaranteed short, <= 28 chars)
+static void formatIntelTag(const Ent& e, char* out, size_t n) {
+  out[0] = 0;
+  if (e.flags & DF_SEPARATED) { strlcpy(out, "Separated!", n); return; }
+  if (e.batL <= 100 || e.batR <= 100 || e.batC <= 100) {
+    char b[28]; int p = 0;
+    if (e.batL <= 100) p += snprintf(b + p, sizeof(b) - p, "L%d ", e.batL);
+    if (e.batR <= 100) p += snprintf(b + p, sizeof(b) - p, "R%d ", e.batR);
+    if (e.batC <= 100) p += snprintf(b + p, sizeof(b) - p, "C%d", e.batC);
+    while (p > 0 && b[p - 1] == ' ') b[--p] = 0;
+    if (e.model[0]) snprintf(out, n, "%s %s", e.model, b);
+    else            strlcpy(out, b, n);
+    return;
+  }
+  if (e.model[0]) { strlcpy(out, e.model, n); return; }
+  if (e.state[0]) { strlcpy(out, e.state, n); return; }
+}
+
 // ---------- for the web page: devices as JSON ----------
 
 void bleJson(String& o) {
@@ -544,7 +612,7 @@ void bleJson(String& o) {
   for (auto& kv : g_ents) v.push_back({ kv.first, &kv.second });
   std::sort(v.begin(), v.end(), [](const std::pair<uint32_t, const Ent*>& a, const std::pair<uint32_t, const Ent*>& b) { return a.second->rssiS > b.second->rssiS; });
   if (v.size() > 150) v.resize(150);
-  o.reserve(64 + v.size() * 110);
+  o.reserve(64 + v.size() * 130);
   o += "{\"on\":"; o += g_bleActive ? "true" : "false";
   o += ",\"count\":"; o += g_lastCount;
   o += ",\"macs\":"; o += g_lastRaw;
@@ -554,14 +622,19 @@ void bleJson(String& o) {
     const Ent* e = pe.second;
     if (!first) o += ',';
     first = false;
+    char tag[30]; formatIntelTag(*e, tag, sizeof(tag));
     o += "{\"id\":"; o += pe.first;
-    o += ",\"n\":"; jsonStr(o, e->name);
+    o += ",\"n\":"; jsonStr(o, e->name[0] ? e->name : e->model);
     o += ",\"t\":"; jsonStr(o, typeName(e->type));
     o += ",\"v\":"; jsonStr(o, vendorLabel(e->cat, e->vkind, e->vcode));
     o += ",\"r\":"; o += e->rssiS;
     o += ",\"m\":"; o += e->nMacs;
     o += ",\"p\":"; o += e->pkts;
     o += ",\"age\":"; o += msSince(now, e->first) / 1000;
+    if (e->flags) { o += ",\"f\":"; o += e->flags; }
+    if (e->bat <= 100) { o += ",\"bat\":"; o += e->bat; }
+    if (tag[0]) { o += ",\"info\":"; jsonStr(o, tag); }
+    if (e->txPwr != 127) { o += ",\"tx\":"; o += e->txPwr; }
     o += '}';
   }
   o += "],\"sens\":[";
@@ -580,6 +653,10 @@ void bleJson(String& o) {
       if (z.r.hasB) { o += ",\"b\":"; o += z.r.batt; }
       if (z.r.hasP) { o += ",\"p\":"; o += String(z.r.press, 1); }
       if (z.r.hasCO2) { o += ",\"co2\":"; o += z.r.co2; }
+      if (z.r.hasDoor) { o += ",\"door\":"; o += z.r.doorOpen ? 1 : 0; }
+      if (z.r.hasMotion) { o += ",\"mot\":"; o += z.r.motion ? 1 : 0; }
+      if (z.r.hasLeak) { o += ",\"leak\":"; o += z.r.leak ? 1 : 0; }
+      if (z.r.hasLux) { o += ",\"lux\":"; o += (int)z.r.lux; }
       o += '}';
     }
     xSemaphoreGive(g_lock);
@@ -587,7 +664,7 @@ void bleJson(String& o) {
   o += "]}";
 }
 
-// details of one device: all its addresses (MACs rotate), services, manufacturer data
+// details of one device: all its addresses (MACs rotate), services, manufacturer data + decoded intel
 void bleDevJson(uint32_t id, String& o) {
   static const char* const AK[] = { "public", "static random", "rotating (private)", "non-resolvable" };
   uint32_t now = millis();
@@ -608,7 +685,7 @@ void bleDevJson(uint32_t id, String& o) {
     o += ']';
     if (best) {
       const Dev& d = *best;
-      o += ",\"n\":"; jsonStr(o, d.name);
+      o += ",\"n\":"; jsonStr(o, d.name[0] ? d.name : d.model);
       { auto ei = g_ents.find(id); o += ",\"label\":"; jsonStr(o, ei != g_ents.end() ? ei->second.label : ""); }
       o += ",\"t\":"; jsonStr(o, typeName(d.type));
       o += ",\"v\":"; jsonStr(o, vendorLabel(d.cat, d.vkind, d.vcode));
@@ -616,6 +693,15 @@ void bleDevJson(uint32_t id, String& o) {
       o += ",\"rmin\":"; o += d.rmin; o += ",\"rmax\":"; o += d.rmax;
       o += ",\"pk\":"; o += d.pkts;
       o += ",\"age\":"; o += msSince(now, d.first) / 1000;
+      o += ",\"f\":"; o += d.flags;
+      if (d.txPwr != 127) { o += ",\"tx\":"; o += d.txPwr; }
+      if (d.bat  <= 100)  { o += ",\"bat\":"; o += d.bat; }
+      if (d.batL <= 100)  { o += ",\"batL\":"; o += d.batL; }
+      if (d.batR <= 100)  { o += ",\"batR\":"; o += d.batR; }
+      if (d.batC <= 100)  { o += ",\"batC\":"; o += d.batC; }
+      if (d.pps10 > 0)    { o += ",\"pps10\":"; o += d.pps10; }
+      if (d.model[0])     { o += ",\"model\":"; jsonStr(o, d.model); }
+      if (d.state[0])     { o += ",\"state\":"; jsonStr(o, d.state); }
       if (d.hasCid) { char b[8]; snprintf(b, sizeof(b), "0x%04X", d.cid); o += ",\"cid\":\""; o += b; o += '"'; }
       if (d.appearance) { o += ",\"app\":"; o += d.appearance; }
       o += ",\"uu\":[";
@@ -645,7 +731,7 @@ void bleLowDuty(bool low) {
 }
 
 // for the tablet (SSE stream): compact, arrays instead of objects, up to 80 devices
-// {"n":count,"m":addresses,"d":[[id,rssi,"type","vendor","name",age_s,addresses,"label"],...]}
+// {"n":count,"m":addresses,"d":[[id,rssi,"type","vendor","name",age_s,addresses,"label",flags,bat,"info",txPwr],...]}
 void bleStreamJson(String& o) {
   uint32_t now = millis();
   std::vector<std::pair<uint32_t, const Ent*>> v;
@@ -653,15 +739,18 @@ void bleStreamJson(String& o) {
   for (auto& kv : g_ents) v.push_back({ kv.first, &kv.second });
   std::sort(v.begin(), v.end(), [](const std::pair<uint32_t, const Ent*>& a, const std::pair<uint32_t, const Ent*>& b) { return a.second->rssiS > b.second->rssiS; });
   if (v.size() > 80) v.resize(80);
-  o.reserve(48 + v.size() * 64);
+  o.reserve(48 + v.size() * 88);
   o = "{\"on\":"; o += g_bleActive ? 1 : 0;
   o += ",\"n\":"; o += g_lastCount; o += ",\"m\":"; o += g_lastRaw; o += ",\"d\":[";
   for (size_t i = 0; i < v.size(); i++) {
     const Ent* e = v[i].second;
     if (i) o += ',';
+    char tag[30]; formatIntelTag(*e, tag, sizeof(tag));
     o += '['; o += v[i].first; o += ','; o += e->rssi; o += ',';   // "calm" value
     jsonStr(o, typeName(e->type)); o += ','; jsonStr(o, vendorLabel(e->cat, e->vkind, e->vcode)); o += ',';
-    jsonStr(o, e->name); o += ','; o += msSince(now, e->first) / 1000; o += ','; o += e->nMacs; o += ','; jsonStr(o, e->label); o += ']';
+    jsonStr(o, e->name[0] ? e->name : e->model); o += ','; o += msSince(now, e->first) / 1000; o += ','; o += e->nMacs; o += ',';
+    jsonStr(o, e->label); o += ','; o += (int)e->flags; o += ','; o += (e->bat <= 100 ? (int)e->bat : -1); o += ',';
+    jsonStr(o, tag); o += ','; o += (int)e->txPwr; o += ']';
   }
   o += "]}";
 }
@@ -711,6 +800,7 @@ void bleForEachEnt(BleEntCb cb, void* ctx) {
     float    rssiSum;
     float    weightSum;
     int8_t   peakRssi;
+    int8_t   txPwr;
     uint8_t  cat, type, vkind, vscore;
     uint16_t vcode;
     char     name[20];
@@ -724,6 +814,7 @@ void bleForEachEnt(BleEntCb cb, void* ctx) {
       const Dev& d = kv.second;
       if (msSince(now, d.t) > 15000 || d.rssiS < -102) continue;
       Agg& a = locEnts[d.ent];
+      if (a.t == 0) a.txPwr = 127;
       float ageS = msSince(now, d.t) / 1000.0f;
       float w = 1.0f / (1.0f + ageS * 0.5f);
       // True sub-decibel anti-multipath rssiF (no stale all-time rmax bias, no integer rounding!)
@@ -731,9 +822,11 @@ void bleForEachEnt(BleEntCb cb, void* ctx) {
       a.weightSum += w;
       if (a.t == 0 || d.rssi > a.peakRssi) a.peakRssi = d.rssi;
       if (d.t >= a.t) a.t = d.t;
+      if (d.txPwr != 127) a.txPwr = d.txPwr;
       if (d.type != T_UNKNOWN) a.type = d.type;
       if (d.vscore > a.vscore) { a.cat = d.cat; a.vkind = d.vkind; a.vcode = d.vcode; a.vscore = d.vscore; }
       if (d.name[0] && !a.name[0]) memcpy(a.name, d.name, sizeof(a.name));
+      else if (d.model[0] && !a.name[0]) strlcpy(a.name, d.model, sizeof(a.name));
       if (g_nLabels > 0 && !a.label[0]) { const char* l = labelFor(d.mac); if (l) strlcpy(a.label, l, sizeof(a.label)); }
     }
     xSemaphoreGive(g_lock);
@@ -742,6 +835,6 @@ void bleForEachEnt(BleEntCb cb, void* ctx) {
     const Agg& a = kv.second;
     if (a.weightSum <= 0) continue;
     float rF = a.rssiSum / a.weightSum;
-    cb(kv.first, rF, a.type, typeName(a.type), vendorLabel(a.cat, a.vkind, a.vcode), a.name, a.label, ctx);
+    cb(kv.first, rF, a.type, typeName(a.type), vendorLabel(a.cat, a.vkind, a.vcode), a.name, a.label, a.txPwr, ctx);
   }
 }

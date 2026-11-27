@@ -22,7 +22,7 @@ void bleLowDuty(bool low);       // web mode: scan less often, share the air wit
 // Locator (2-stick triangulation) helpers
 bool bleMatchMac(const uint8_t mac[6], uint32_t& outEntId);
 void bleLocatorBoost(bool on);
-typedef void (*BleEntCb)(uint32_t id, float rssiF, uint8_t rawType, const char* typeStr, const char* vendor, const char* name, const char* label, void* ctx);
+typedef void (*BleEntCb)(uint32_t id, float rssiF, uint8_t rawType, const char* typeStr, const char* vendor, const char* name, const char* label, int8_t txPwr, void* ctx);
 void bleForEachEnt(BleEntCb cb, void* ctx);
 
 extern const Section bleSection;

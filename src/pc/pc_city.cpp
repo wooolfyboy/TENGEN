@@ -1,10 +1,7 @@
 // ============================================================
-//  pc_city.cpp — PC › City section: the laptop's process city.
-//  Each program (all its processes together) is a tower:
-//    height = CPU use, width = memory,
-//    white roof = active-window program, orange = over 50% CPU.
-//  A program keeps its plot while it is listed; new ones "grow", gone ones sink.
-//  The camera orbits on its own; a wheel click moves the spotlight to the next tower.
+//  pc_city.cpp — PC › City section: Zen Monolith Plaza of processes.
+//  Height = CPU use, width = memory, white crown = active window,
+//  45° crystal prism = >50% CPU. Wheel click cycles target spotlight.
 // ============================================================
 #include <algorithm>
 #include "core/lang.h"
@@ -34,9 +31,10 @@ void pcCityNext() {                          // click: next tower (by descending
   for (int i = 0; i < CITY_MAX; i++) if (s_tw[i].alive) order[n++] = i;
   if (!n) { s_sel = -1; return; }
   std::sort(order, order + n, [](int a, int b) { return s_tw[a].cpu > s_tw[b].cpu; });
-  int k = 0;
-  for (int i = 0; i < n; i++) if (order[i] == s_sel) k = i + 1;
-  s_sel = order[k % n];
+  if (s_sel < 0) { s_sel = order[0]; return; }
+  int k = n;
+  for (int i = 0; i < n; i++) if (order[i] == s_sel) { k = i + 1; break; }
+  s_sel = (k < n) ? order[k] : -1;
 }
 
 // "PP\tname,cpu*10,MB,active\t..."
@@ -96,20 +94,28 @@ void drawPcCity(uint32_t now) {
   s_yaw += 0.003f;
   const float cy_ = cosf(s_yaw), sy_ = sinf(s_yaw), pitch = 0.6f, cp = cosf(pitch), sp = sinf(pitch);
   const float F = 230, dist = 3.6f;
-  const int cx = W / 2 - 40, cyS = 104;
+  const int cx = W / 2 - 44, cyS = 104;
   auto proj = [&](float x, float y, float z, float& sx, float& syy, float& d) {
     float xr = x * cy_ - z * sy_, zr = x * sy_ + z * cy_;
     float vy = y * cp + zr * sp, vz = -y * sp + zr * cp;
     d = dist + vz; sx = cx + xr * F / d; syy = cyS - vy * F / d;
   };
-  // plaza and street grid
+
+  const uint16_t line = UI_LINE(), acc = C_ACC(), hotC = C_HOT();
+  // Zen circuit plaza grid + outer boundary accent
   const float half = 1.0f, step = 2 * half / CITY_GRID;
   for (int k = 0; k <= CITY_GRID; k++) {
     float a = -half + k * step, x0, y0, x1, y1, d;
-    proj(a, 0, -half, x0, y0, d); proj(a, 0, half, x1, y1, d); spr.drawLine(x0, y0, x1, y1, UI_LINE());
-    proj(-half, 0, a, x0, y0, d); proj(half, 0, a, x1, y1, d); spr.drawLine(x0, y0, x1, y1, UI_LINE());
+    uint16_t gc = (k == 0 || k == CITY_GRID) ? scale565(acc, 65) : line;
+    proj(a, 0, -half, x0, y0, d); proj(a, 0, half, x1, y1, d); spr.drawLine(x0, y0, x1, y1, gc);
+    proj(-half, 0, a, x0, y0, d); proj(half, 0, a, x1, y1, d); spr.drawLine(x0, y0, x1, y1, gc);
   }
-  // animation and draw order (far ones first)
+  // Central Tengen nexus marker
+  float ox0, oy0, od0, ox1, oy1, od1;
+  proj(0, 0, 0, ox0, oy0, od0); proj(0, 0.14f, 0, ox1, oy1, od1);
+  spr.drawLine(ox0, oy0, ox1, oy1, scale565(acc, 70));
+  drawMarker((int)ox0, (int)oy0, acc, false);
+
   struct D { int i; float depth; };
   D order[CITY_MAX]; int n = 0;
   float maxRam = 1;
@@ -126,35 +132,57 @@ void drawPcCity(uint32_t now) {
     order[n++] = { i, d };
   }
   std::sort(order, order + n, [](const D& a, const D& b) { return a.depth > b.depth; });
+
   for (int k = 0; k < n; k++) {
     Tower& t = s_tw[order[k].i];
     float gx = -half + (t.slot % CITY_GRID + 0.5f) * step, gz = -half + (t.slot / CITY_GRID + 0.5f) * step;
-    float S = t.w / 2;
-    const float CX[4] = { -S, S, S, -S }, CZ[4] = { -S, -S, S, S };
-    float bx[4], by[4], tx[4], ty[4], dd[4], d;
-    for (int q = 0; q < 4; q++) { proj(gx + CX[q], 0, gz + CZ[q], bx[q], by[q], dd[q]); proj(gx + CX[q], t.h, gz + CZ[q], tx[q], ty[q], d); }
     bool hot = t.cpu > 50, sel = order[k].i == s_sel;
+    float sb = t.w / 2, st = hot ? sb * 0.52f : (t.fg ? sb * 0.88f : sb * 0.72f);
+    float bx[4], by[4], tx[4], ty[4], dd[4], d;
+    for (int q = 0; q < 4; q++) {
+      float ox0, oz0, ox1, oz1;
+      if (hot) {
+        const float RX[4] = { 0, 1.25f, 0, -1.25f }, RZ[4] = { -1.25f, 0, 1.25f, 0 };
+        ox0 = RX[q] * sb; oz0 = RZ[q] * sb; ox1 = RX[q] * st; oz1 = RZ[q] * st;
+      } else {
+        const float CX[4] = { -1, 1, 1, -1 }, CZ[4] = { -1, -1, 1, 1 };
+        ox0 = CX[q] * sb; oz0 = CZ[q] * sb; ox1 = CX[q] * st; oz1 = CZ[q] * st;
+      }
+      proj(gx + ox0, 0, gz + oz0, bx[q], by[q], dd[q]);
+      proj(gx + ox1, t.h, gz + oz1, tx[q], ty[q], d);
+    }
+    if (sel || hot) {
+      float lr = sb * 1.9f, lx[4], ly[4], ld;
+      const float RX[4] = { 0, 1, 0, -1 }, RZ[4] = { -1, 0, 1, 0 };
+      for (int q = 0; q < 4; q++) proj(gx + RX[q] * lr, 0, gz + RZ[q] * lr, lx[q], ly[q], ld);
+      for (int q = 0; q < 4; q++) spr.drawLine(lx[q], ly[q], lx[(q + 1) & 3], ly[(q + 1) & 3], hot ? C_ALERT() : hotC);
+    }
     uint16_t col = hot ? C_ALERT() : heatV(0.25f + 0.75f * constrain(t.cpu / 60.0f, 0.0f, 1.0f));
     int ord[4] = { 0, 1, 2, 3 };
     std::sort(ord, ord + 4, [&](int a, int b) { return dd[a] + dd[(a + 1) % 4] > dd[b] + dd[(b + 1) % 4]; });
     for (int o = 0; o < 4; o++) {
       int a = ord[o], b = (a + 1) % 4;
-      uint16_t fc = scale565(col, (a % 2 == 0) ? 55 : 35);
+      uint16_t fc = scale565(col, (a % 2 == 0) ? 52 : 32);
       spr.fillTriangle(bx[a], by[a], bx[b], by[b], tx[b], ty[b], fc);
       spr.fillTriangle(bx[a], by[a], tx[b], ty[b], tx[a], ty[a], fc);
+      if (o == 3 && t.h > 0.08f) {
+        spr.drawLine((bx[a] + bx[b]) * 0.5f, (by[a] + by[b]) * 0.5f,
+                     (tx[a] + tx[b]) * 0.5f, (ty[a] + ty[b]) * 0.5f, sel ? hotC : scale565(col, 90));
+      }
     }
-    uint16_t roof = t.fg ? C_HOT() : col;                       // active window: white roof
+    uint16_t roof = t.fg ? hotC : col;
     spr.fillTriangle(tx[0], ty[0], tx[1], ty[1], tx[2], ty[2], roof);
     spr.fillTriangle(tx[0], ty[0], tx[2], ty[2], tx[3], ty[3], roof);
-    for (int q = 0; q < 4; q++) spr.drawLine(tx[q], ty[q], tx[(q + 1) % 4], ty[(q + 1) % 4], sel ? C_HOT() : scale565(C_HOT(), 60));
-    if (sel) {                                                  // spotlight: beam from above
-      float px, py, pd; proj(gx, t.h + 0.35f, gz, px, py, pd);
-      float rx, ry, rd; proj(gx, t.h, gz, rx, ry, rd);
-      spr.drawLine(px, py, rx, ry, C_HOT());
-      spr.fillCircle(px, py, 2, C_HOT());
+    for (int q = 0; q < 4; q++) spr.drawLine(tx[q], ty[q], tx[(q + 1) % 4], ty[(q + 1) % 4], sel ? hotC : scale565(hotC, 65));
+    if (sel) {
+      float px, py, pd, rx, ry, rd;
+      proj(gx, t.h + 0.32f, gz, px, py, pd); proj(gx, t.h, gz, rx, ry, rd);
+      spr.drawLine(px, py, rx, ry, hotC);
+      spr.fillCircle((int)px, (int)py, 2, hot ? C_ALERT() : hotC);
     }
   }
-  // labels for the three busiest
+
+  // Labels for the three busiest
   int top[3] = { -1, -1, -1 };
   for (int i = 0; i < CITY_MAX; i++) {
     if (!s_tw[i].alive) continue;
@@ -170,37 +198,39 @@ void drawPcCity(uint32_t now) {
     int y = (int)syy - 4;
     for (int q = 0; q < r; q++) if (abs(y - ly[q]) < 10) y = ly[q] - 10;
     y = max(y, UI_TOP + 10); ly[r] = y;
-    spr.setTextColor(t.cpu > 50 ? C_ALERT() : C_HOT());
+    spr.setTextColor(t.cpu > 50 ? C_ALERT() : hotC);
     txt(t.name, (int)sx, y, 1);
   }
-  // right side: spotlight or totals
-  const int px = W - 104;
+
+  // Right telemetry panel (framed HUD readout)
+  const int px = W - 108, pw = 100, py = UI_TOP + 2, ph = 118;
+  hudPanel(px - 4, py, pw + 4, ph, 7, s_sel >= 0 ? acc : line, false, C_BG());
   char buf[32];
   spr.setTextDatum(TL_DATUM);
   int alive = 0; for (auto& t : s_tw) if (t.alive) alive++;
   if (s_sel >= 0 && s_tw[s_sel].alive) {
     Tower& t = s_tw[s_sel];
-    spr.setTextColor(UI_LABEL()); txt(L("SPOTLIGHT", "В ФОКУСЕ"), px, UI_TOP + 4, 1);
-    spr.setTextColor(C_HOT()); char nm[20]; fitText(t.name, nm, sizeof(nm), 100, 2); txt(nm, px, UI_TOP + 16, 2);
+    spr.setTextColor(acc); txt(L("// LOCK", "// ФОКУС"), px, py + 4, 1);
+    spr.setTextColor(hotC); char nm[20]; fitText(t.name, nm, sizeof(nm), pw - 4, 2); txt(nm, px, py + 16, 2);
     snprintf(buf, sizeof(buf), "%.1f%%", t.cpu);
-    spr.setTextColor(t.cpu > 50 ? C_ALERT() : C_ACC()); txt(buf, px, UI_TOP + 38, 4);
-    spr.setTextColor(UI_LABEL()); txt("CPU", px, UI_TOP + 64, 1);
+    spr.setTextColor(t.cpu > 50 ? C_ALERT() : acc); txt(buf, px, py + 38, 4);
+    spr.setTextColor(UI_DIM()); txt("CPU", px, py + 64, 1);
     if (t.ram >= 1024) snprintf(buf, sizeof(buf), L("%.1f GB RAM", "%.1f ГБ ОЗУ"), t.ram / 1024); else snprintf(buf, sizeof(buf), L("%d MB RAM", "%d МБ ОЗУ"), (int)t.ram);
-    spr.setTextColor(C_HOT()); txt(buf, px, UI_TOP + 78, 1);
-    if (t.fg) { spr.setTextColor(C_ACC()); txt(L("ACTIVE WINDOW", "АКТИВНОЕ ОКНО"), px, UI_TOP + 92, 1); }
+    spr.setTextColor(hotC); txt(buf, px, py + 78, 1);
+    if (t.fg) { spr.setTextColor(acc); txt(L("ACTIVE WIN", "АКТИВНО"), px, py + 94, 1); }
   } else {
-    spr.setTextColor(UI_LABEL()); txt(L("PROGRAMS", "ПРОГРАММЫ"), px, UI_TOP + 4, 1);
+    spr.setTextColor(UI_LABEL()); txt(L("MONOLITHS", "МОНОЛИТЫ"), px, py + 4, 1);
     snprintf(buf, sizeof(buf), "%d", alive);
-    spr.setTextColor(C_HOT()); txt(buf, px, UI_TOP + 16, 4);
+    spr.setTextColor(hotC); txt(buf, px, py + 16, 4);
     spr.setTextColor(UI_DIM());
-    txt(L("HEIGHT  CPU", "ВЫСОТА  ЦП"), px, UI_TOP + 50, 1);
-    txt(L("WIDTH   RAM", "ШИРИНА  ОЗУ"), px, UI_TOP + 62, 1);
-    txt(L("WHITE   ACTIVE", "БЕЛЫЙ   АКТИВНО"), px, UI_TOP + 74, 1);
-    spr.setTextColor(C_ALERT()); txt(L("ORANGE  >50% CPU", "ЦВЕТ    >50% ЦП"), px, UI_TOP + 86, 1);
+    txt(L("HEIGHT  CPU", "ВЫСОТА  ЦП"), px, py + 50, 1);
+    txt(L("WIDTH   RAM", "ШИРИНА  ОЗУ"), px, py + 62, 1);
+    txt(L("CROWN   ACTIVE", "ВЕРХ    ОКНО"), px, py + 74, 1);
+    spr.setTextColor(C_ALERT()); txt(L("PRISM   >50%", "ПРИЗМА  >50%"), px, py + 86, 1);
   }
-  if (!pcCityLive(now)) { spr.setTextColor(UI_DIM()); txt(L("WAITING FOR DATA", "ЖДУ ДАННЫЕ"), px, UI_TOP + 110, 1); }
+  if (!pcCityLive(now)) { spr.setTextColor(UI_DIM()); txt(L("WAITING...", "ЖДУ ПК..."), px, py + 104, 1); }
   snprintf(buf, sizeof(buf), L("%d%% total", "всего %d%%"), (int)lroundf(g_pc.cpu));
   uiHeader(L("Process city", "Город процессов"), buf, g_pc.cpu >= 90);
-  uiFooter(L("wheel: screens  ·  click: spotlight", "колесо: экраны · нажать: фокус"), L("side: back", "кнопка: назад"));
+  uiFooter(L("wheel: screens  ·  click: lock", "колесо: экраны · нажать: фокус"), L("side: back", "кнопка: назад"));
   present();
 }

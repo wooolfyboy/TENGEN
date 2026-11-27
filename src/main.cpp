@@ -22,7 +22,9 @@
 #include "gallery/sat.h"
 #include <driver/gpio.h>
 #include <esp_ota_ops.h>
+#include <soc/rtc_cntl_reg.h>
 #include "audio/audio.h"
+#include "probe/ir.h"
 #include "core/perf.h"
 
 
@@ -48,6 +50,9 @@ static void confirmFirmware(uint32_t now) {
 }
 
 void setup() {
+  // Another firmware (auto-updater) may leave FORCE_DOWNLOAD_BOOT set in RTC memory, which sends every
+  // later reset back into the ROM bootloader. Clear it on each start.
+  REG_CLR_BIT(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
   crumbBoot();          // black box: previous reset reason and last step
   checkWakeHold();      // after "power off", wake only by holding the side button
 
@@ -69,6 +74,7 @@ void setup() {
   bootScreen();          // boot animation
   bleBegin();
   audioBegin();          // speaker: UI sounds
+  irBegin();             // background IR receiver (Malata emergency trigger)
   satBegin();            // saved satellite orbits (Gallery > Globe)
   navBegin();
   navDraw(millis());
@@ -81,6 +87,7 @@ void loop() {
   crumbFeed();
   crumb("input");   inputPoll();
   uint32_t now = millis();
+  irPollBg(now);         // background IR listener (Evil Mode trigger)
   crumb("ble sample"); bleSample(now);
   ledsTick();
   batTick(now);

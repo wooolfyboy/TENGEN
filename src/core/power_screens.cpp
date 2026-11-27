@@ -92,3 +92,64 @@ void shutFrame(uint32_t t) {
   }
 }
 
+// ---------- Evil Mode / Emergency IR Shutdown screen ----------
+void evilFrame(uint32_t elapsed, uint32_t total) {
+  const int W = spr.width(), H = spr.height(), cx = W / 2;
+  uint32_t rem = elapsed < total ? total - elapsed : 0;
+  float pct = total ? (float)rem / (float)total : 0.0f;
+  bool panic = rem < 1200;
+  bool invert = panic && ((elapsed / 70) & 1);
+
+  uint16_t red    = C(255, 20, 20);
+  uint16_t darkR  = C(90, 0, 0);
+  uint16_t bg     = invert ? C(160, 0, 0) : TFT_BLACK;
+  uint16_t fg     = invert ? TFT_BLACK : red;
+  uint16_t bright = invert ? TFT_WHITE : C(255, 190, 190);
+
+  spr.fillSprite(bg);
+
+  // Scrolling diagonal hazard stripes top & bottom
+  int shift = (int)((elapsed / 18) % 20);
+  for (int x = -20; x < W + 20; x += 20) {
+    for (int k = 0; k < 10; k++) {
+      spr.drawLine(x + shift + k, 0, x + shift + k - 12, 13, fg);
+      spr.drawLine(x - shift + k, H - 14, x - shift + k - 12, H - 1, fg);
+    }
+  }
+  spr.drawFastHLine(0, 14, W, red);
+  spr.drawFastHLine(0, H - 15, W, red);
+
+  // Subtle horizontal glitch scanlines
+  uint32_t seed = elapsed * 2654435761u;
+  for (int i = 0; i < 4; i++) {
+    seed = seed * 1664525u + 1013904223u;
+    int gy = 20 + (int)(seed % (H - 40));
+    int gx = (int)((seed >> 8) % (W - 40));
+    int gw = 20 + (int)((seed >> 16) % 70);
+    spr.drawFastHLine(gx, gy, min(gw, W - gx), darkR);
+  }
+
+  // Header alert badge
+  spr.setTextDatum(MC_DATUM);
+  spr.setTextColor(((elapsed / 120) & 1) ? bright : fg);
+  txt(L("!! EVIL MODE !!", "!! ЗЛОЙ РЕЖИМ !!"), cx, 32, 2);
+
+  // Huge shaking countdown
+  int jx = (int)((seed % 5) - 2) * (panic ? 2 : 1);
+  int jy = (int)(((seed >> 4) % 5) - 2) * (panic ? 2 : 1);
+  char buf[20];
+  snprintf(buf, sizeof(buf), "%lu.%02lu", (unsigned long)(rem / 1000), (unsigned long)((rem % 1000) / 10));
+  spr.setTextColor(bright);
+  txt(buf, cx + jx, 78 + jy, 4);
+
+  // Draining progress bar
+  int bx = 24, by = 114, bw = W - 48, bh = 10;
+  spr.drawRect(bx, by, bw, bh, red);
+  int fw = (int)((bw - 4) * pct);
+  if (fw > 0) spr.fillRect(bx + 2, by + 2, fw, bh - 4, fg);
+
+  // Subtitle
+  spr.setTextColor(fg);
+  txt(L("EMERGENCY SHUTDOWN", "ЭКСТРЕННОЕ ОТКЛЮЧЕНИЕ"), cx, 138, 1);
+}
+

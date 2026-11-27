@@ -13,6 +13,7 @@
 #include "core/settings.h"
 #include "core/ui.h"
 #include "core/crumb.h"
+#include "audio/audio.h"
 
 uint32_t g_powerHold = 0;
 static uint32_t s_lastTouch = 0;
@@ -63,6 +64,79 @@ void powerOff() {
   spr.fillSprite(TFT_BLACK); spr.pushSprite(0, 0);
   tft.writecommand(0x28);   // display off
   tft.writecommand(0x10);   // display sleep
+  sleepNow();
+}
+
+void powerEmergency() {
+  crumb("evil mode");
+  settingsSaveNow();
+  // wake screen to full brightness even if dimmed or turned off from tablet
+  g_screenOff = false;
+  tft.writecommand(0x29);
+  analogWrite(TFT_BL, 255);
+
+  const uint32_t total = (uint32_t)constrain(g_emSec, 1, 30) * 1000UL;
+  const int vol = constrain(g_emVol, 0, 100);
+  const int ledBr = constrain(g_emLed, 0, 100) * 255 / 100;
+  strip.setBrightness(ledBr);
+
+  uint32_t t0 = millis();
+  uint32_t lastSiren = 0;
+  uint32_t lastLed = 0;
+  bool hiTone = true;
+
+  for (;;) {
+    crumbFeed();
+    uint32_t now = millis();
+    uint32_t elapsed = now - t0;
+    if (elapsed >= total) break;
+    uint32_t rem = total - elapsed;
+
+    // Siren klaxon: alternates 880 / 1380 Hz, accelerates to frantic beeps in final 1.2 s
+    uint32_t period = rem < 1200 ? 110 : 240;
+    if (vol > 0 && (!lastSiren || now - lastSiren >= period)) {
+      lastSiren = now;
+      uint16_t hz = (rem < 1200) ? (hiTone ? 2100 : 1650) : (hiTone ? 1380 : 880);
+      audioSiren(hz, (uint16_t)(period - 20), vol);
+      hiTone = !hiTone;
+    }
+
+    // Blazing red strobe + angry chasing pulse on the 8 WS2812 LEDs
+    if (now - lastLed >= 35) {
+      lastLed = now;
+      strip.clear();
+      if (ledBr > 0) {
+        bool strobe = ((elapsed / (rem < 1200 ? 55 : 110)) & 1) == 0;
+        if (strobe) {
+          for (int i = 0; i < WS2812_N; i++) strip.setPixelColor(i, strip.Color(255, 0, 0));
+        } else {
+          int head = (elapsed / 45) % WS2812_N;
+          strip.setPixelColor(head, strip.Color(255, 25, 0));
+          strip.setPixelColor((head + WS2812_N - 1) % WS2812_N, strip.Color(120, 0, 0));
+        }
+      }
+      strip.show();
+    }
+
+    evilFrame(elapsed, total);
+    spr.pushSprite(0, 0);
+    delay(16);
+  }
+
+  // Final power-down drop
+  if (vol > 0) audioSiren(180, 320, vol);
+  if (ledBr > 0) {
+    for (int i = 0; i < WS2812_N; i++) strip.setPixelColor(i, strip.Color(255, 80, 80));
+    strip.show();
+  }
+  spr.fillSprite(C(220, 0, 0));
+  spr.pushSprite(0, 0);
+  delay(180);
+  strip.clear(); strip.show();
+  spr.fillSprite(TFT_BLACK); spr.pushSprite(0, 0);
+  delay(140);
+  tft.writecommand(0x28);
+  tft.writecommand(0x10);
   sleepNow();
 }
 

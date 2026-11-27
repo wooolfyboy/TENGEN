@@ -22,5 +22,7 @@ void powerTouch();                          // a press / wheel turn happened
 bool powerIdle();                           // screen is dimmed now
 void powerIdleTick(uint32_t now);
 void powerOff();
+void powerEmergency();              // Evil Mode: red strobe, loud siren, countdown -> deep sleep
 void drawPowerHold();
 void shutFrame(uint32_t t);         // power-off animation frame at t ms (0..1400)
+void evilFrame(uint32_t elapsed, uint32_t total);

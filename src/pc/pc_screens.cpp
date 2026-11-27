@@ -25,9 +25,11 @@ static void upStr(uint32_t s, char* out, size_t n) {
   else            snprintf(out, n, L("up %luh %lum", "работает %lu ч %lu мин"), (unsigned long)(s / 3600), (unsigned long)(s / 60 % 60));
 }
 static void bar(int x, int y, int w, int h, float pct, uint16_t col) {
-  spr.drawRect(x, y, w, h, UI_LINE());
-  int f = (int)((w - 2) * constrain(pct, 0.0f, 100.0f) / 100.0f);
-  if (f > 0) spr.fillRect(x + 1, y + 1, f, h - 2, col);
+  const int N = 14, gap = 2, sw = (w - gap * (N - 1)) / N;
+  int lit = (int)lroundf(constrain(pct, 0.0f, 100.0f) * N / 100.0f);
+  for (int i = 0; i < N; i++) {
+    spr.fillRect(x + i * (sw + gap), y, sw, h, i < lit ? col : UI_LINE());
+  }
 }
 void drawPc(uint32_t now) {
   const PcStat& p = g_pc;

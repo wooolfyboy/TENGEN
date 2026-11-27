@@ -1,11 +1,11 @@
 // ============================================================
 //  menu.cpp — main menu and navigation
 //
-//  Three levels: main menu (section cards) -> section submenu
-//  (screens with live numbers) -> screen. Sections are Section tables
-//  and the menu treats them all alike.
+//  Three levels: main menu (Evangelion MAGI × Zen 天眼 focal stage)
+//  -> section submenu (screens with live numbers) -> screen.
 // ============================================================
 #include <ctype.h>
+#include <math.h>
 #include "core/lang.h"
 #include "core/menu.h"
 #include "core/theme.h"
@@ -14,6 +14,8 @@
 #include "core/ui.h"
 #include "core/langpick.h"
 #include "core/board.h"
+#include "core/leds.h"
+#include "core/seal.h"
 #include "gallery/gallery.h"
 #include "web/web.h"
 #include "pc/pc.h"
@@ -64,27 +66,28 @@ static const Section probeSection = {
   probeClick, probeRotate, nullptr, probeTick, probeDraw,
 };
 
-// card order in the main menu (most-used 5 fit on the first screen without scrolling)
 static const Section* const SECTIONS[] = {
   &bleSection, &locatorSection, &wifiSection, &webSection, &pcSection,
   &gallerySection, &subghzSection, &soundSection, &probeSection, &settingsSection
 };
 static const int N_SECTIONS = sizeof(SECTIONS) / sizeof(SECTIONS[0]);
 
-static int  s_cur = -1;          // open section; -1 = main menu
-static int  s_menuSel = 0;       // selected card
-static bool s_sub = false;       // submenu is shown
-static int  s_subSel = 0;        // submenu cursor
+static int   s_cur = -1;          // open section; -1 = main menu
+static int   s_menuSel = 0;       // selected card
+static float s_glide = 0.0f;      // horizontal spring offset on rotation (px)
+static bool  s_sub = false;       // submenu is shown
+static int   s_subSel = 0;        // submenu cursor
 
 static const Section* cur() { return s_cur >= 0 ? SECTIONS[s_cur] : nullptr; }
 bool navActive(const Section* s) { return cur() == s; }
 bool navInSub() { return s_sub; }
 
-void navBegin() { s_cur = -1; s_menuSel = 0; s_sub = false; }
+void navBegin() { s_cur = -1; s_menuSel = 0; s_glide = 0.0f; s_sub = false; }
 
 static void enterSection(int i) {
   s_cur = i;
   const Section* s = cur();
+  ledsEvent(2);
   s->enter();
   s_sub = s->nScreens > 0;
   if (s_sub) s_subSel = s->screenNow();
@@ -98,7 +101,6 @@ static void goMain() {
   s_sub = false;
 }
 
-// open a section from outside (e.g. the desktop app connected over USB: open Web)
 void navOpen(const Section* target) {
   if (cur() == target) return;
   int idx = -1;
@@ -110,7 +112,7 @@ void navOpen(const Section* target) {
 }
 
 void navClick() {
-  if (g_langAsk) { langPickClick(); return; }       // first boot: language first
+  if (g_langAsk) { langPickClick(); return; }
   const Section* s = cur();
   if (!s)    { enterSection(s_menuSel); return; }
   if (s_sub) { s->open(s_subSel); s_sub = false; return; }
@@ -120,7 +122,11 @@ void navClick() {
 void navRotate(int dir) {
   if (g_langAsk) { langPickRotate(dir); return; }
   const Section* s = cur();
-  if (!s)    { s_menuSel = (s_menuSel + dir + N_SECTIONS) % N_SECTIONS; return; }
+  if (!s) {
+    s_menuSel = (s_menuSel + dir + N_SECTIONS) % N_SECTIONS;
+    s_glide = constrain(s_glide + (dir > 0 ? 28.0f : -28.0f), -44.0f, 44.0f);
+    return;
+  }
   if (s_sub) { s_subSel = (s_subSel + dir + s->nScreens) % s->nScreens; return; }
   if (s->rotate) s->rotate(dir);
 }
@@ -138,7 +144,7 @@ void navBack() {
   const Section* s = cur();
   if (!s) return;
   if (!s_sub && s->nScreens > 0) {
-    if (s->back && s->back()) return;      // the section closed something of its own (e.g. details)
+    if (s->back && s->back()) return;
     navToSub();
     return;
   }
@@ -159,7 +165,6 @@ static void drawSectionSub(const Section* s) {
   drawSubmenu(title, C(s->r, s->g, s->b), items, n, s_subSel);
 }
 
-// section caption -> big value + small caption ("23 devices" -> "23" / "DEVICES")
 static void splitSubtitle(const char* sub, char* big, char* small, size_t n) {
   const char* colon = strchr(sub, ':');
   if (isdigit((unsigned char)sub[0])) {
@@ -178,73 +183,204 @@ static void splitSubtitle(const char* sub, char* big, char* small, size_t n) {
   utf8UpperInPlace(big); utf8UpperInPlace(small);
 }
 
-// HUD main menu: cut-corner panels, status on top, telemetry below
+// Crisp 2x-downsampled 16x30 天眼 (TENGEN) Hanko stamp from core/seal.h
+static void drawMiniSeal(int x0, int y0, uint16_t ink, uint16_t bg) {
+  for (int y = 0; y < 30; y++) {
+    for (int x = 0; x < 16; x++) {
+      bool cut = false;
+      for (int dy = 0; dy < 2; dy++) {
+        int sy = y * 2 + dy;
+        for (int dx = 0; dx < 2; dx++) {
+          int sx = x * 2 + dx;
+          uint8_t b = SEAL_BITS[sy * 4 + (sx >> 3)];
+          if (!((b >> (7 - (sx & 7))) & 1)) cut = true;
+        }
+      }
+      spr.drawPixel(x0 + x, y0 + y, cut ? bg : ink);
+    }
+  }
+}
+
+// Sacred Zen Enso (incomplete brush circle) + 8-spoke Dharma compass halo
+static void drawEnsoHalo(int cx, int cy, int r, uint16_t acc, uint16_t dim) {
+  // 8 subtle Dharma ticks around the outer perimeter
+  for (int k = 0; k < 8; k++) {
+    float a = k * PI * 0.25f;
+    int x0 = cx + (int)lroundf(cosf(a) * (r + 2));
+    int y0 = cy + (int)lroundf(sinf(a) * (r + 2));
+    int x1 = cx + (int)lroundf(cosf(a) * (r + (k % 2 == 0 ? 5 : 3)));
+    int y1 = cy + (int)lroundf(sinf(a) * (r + (k % 2 == 0 ? 5 : 3)));
+    spr.drawLine(x0, y0, x1, y1, k % 2 == 0 ? acc : dim);
+  }
+  // Incomplete Enso arc (leaves organic 52-degree Zen opening at bottom-right)
+  int px = -1, py = -1;
+  for (int d = 42; d <= 350; d += 8) {
+    float a = d * PI / 180.0f;
+    int x = cx + (int)lroundf(cosf(a) * r);
+    int y = cy + (int)lroundf(sinf(a) * r);
+    if (px >= 0) {
+      spr.drawLine(px, py, x, y, d < 280 ? acc : dim);
+      if (d > 75 && d < 220) {
+        int xi = cx + (int)lroundf(cosf(a) * (r - 1));
+        int yi = cy + (int)lroundf(sinf(a) * (r - 1));
+        spr.drawPixel(xi, yi, acc);
+      }
+    }
+    px = x; py = y;
+  }
+}
+
+// Flanking wing card (prev / next section)
+static void drawWingCard(int x, int y, int w, int h, const Section* s, bool isLeft, uint16_t bg, uint16_t lineCol, uint16_t dim, uint16_t labelCol, uint16_t acc) {
+  hudPanel(x, y, w, h, 9, lineCol, false, bg);
+  int cx = x + w / 2;
+  // Subtle NERV directional chevron at outer edge
+  int ax = isLeft ? x + 5 : x + w - 5, ay = y + h / 2;
+  int dx = isLeft ? 3 : -3;
+  spr.drawLine(ax, ay, ax + dx, ay - 4, acc);
+  spr.drawLine(ax, ay, ax + dx, ay + 4, acc);
+
+  s->icon(cx, y + 26, dim, bg);
+
+  char title[36], fitT[36];
+  utf8Upper(LT(s->title), title, sizeof title);
+  fitText(title, fitT, sizeof fitT, w - 10, 1);
+  spr.setTextDatum(TC_DATUM);
+  spr.setTextColor(labelCol);
+  txt(fitT, cx, y + 50, 1);
+
+  spr.drawFastHLine(x + 10, y + 63, w - 20, lineCol);
+
+  char sub[48], big[36], small[36], fitB[24], fitS[24];
+  s->subtitle(sub, sizeof(sub));
+  splitSubtitle(sub, big, small, sizeof(big));
+  bool alertish = (strcmp(small, L("NO CHIP", "НЕТ ЧИПА")) == 0);
+  fitText(big, fitB, sizeof fitB, w - 10, 2);
+  spr.setTextColor(alertish ? C_ALERT() : labelCol);
+  txt(fitB, cx, y + 68, 2);
+
+  fitText(small, fitS, sizeof fitS, w - 10, 1);
+  spr.setTextColor(dim);
+  txt(fitS, cx, y + 86, 1);
+}
+
+// Evangelion MAGI × Zen 天眼 Focal Altar Main Menu (320x170)
 static void drawMainMenuHud() {
   int W = spr.width(), H = spr.height();
-  uint16_t bg = C_BG(), acc = C_ACC(), steel = C(150, 150, 165), dim = C(110, 110, 125);
+  uint16_t bg = C_BG(), acc = C_ACC(), hot = C_HOT(), lineCol = UI_LINE(), labelCol = UI_LABEL(), dim = UI_DIM();
   spr.fillSprite(bg);
+
+  // Decay spring glide smoothly; zero SPI churn once settled!
+  if (fabsf(s_glide) > 0.4f) {
+    s_glide *= 0.60f;
+    g_fastFrame = true;
+  } else {
+    s_glide = 0.0f;
+  }
+  int gx = (int)lroundf(s_glide);
+
+  // ---- Top NERV Command Bar ----
+  for (int k = 0; k < 3; k++) {
+    spr.drawLine(8 + k * 4, 13, 11 + k * 4, 5, acc);
+  }
+  char buf[40];
+  snprintf(buf, sizeof(buf), L("TENGEN · MAGI  %02d/%02d", "TENGEN · MAGI  %02d/%02d"), s_menuSel + 1, N_SECTIONS);
   spr.setTextDatum(TL_DATUM);
-  spr.setTextColor(dim);
-  txt(L("// " DEVICE_NAME " · ONLINE", "// " DEVICE_NAME " · ГОТОВ"), 8, 5, 1);
-  // battery: percent and five segments
-  char buf[32];
+  spr.setTextColor(hot);
+  txt(buf, 23, 5, 1);
+
   if (g_bat.ok) {
-    snprintf(buf, sizeof(buf), L("BAT %d%%", "ЗАРЯД %d%%"), g_bat.soc);
+    uint16_t bc = g_bat.soc <= 20 ? C_ALERT() : acc;
+    snprintf(buf, sizeof(buf), "%d%%", g_bat.soc);
     spr.setTextDatum(TR_DATUM);
-    spr.setTextColor(g_bat.soc <= 20 ? C_ALERT() : acc);
+    spr.setTextColor(bc);
     txt(buf, W - 44, 5, 1);
     for (int i = 0; i < 5; i++) {
       bool on = g_bat.soc > i * 20;
-      spr.fillRect(W - 40 + i * 7, 5, 5, 8, on ? (g_bat.soc <= 20 ? C_ALERT() : acc) : C(40, 40, 50));
+      spr.fillRect(W - 40 + i * 7, 5, 5, 8, on ? bc : lineCol);
     }
   }
+
+  // Fading tactical rule + 10 section pips
   int span = W - 16;
-  for (int s = 0; s < 16; s++) {                        // line fading to the right
+  for (int s = 0; s < 16; s++) {
     int x0 = 8 + s * span / 16, x1 = 8 + (s + 1) * span / 16;
-    spr.drawFastHLine(x0, 18, x1 - x0, scale565(acc, 100 - s * 100 / 15));
+    spr.drawFastHLine(x0, 18, x1 - x0, scale565(acc, 100 - s * 88 / 15));
+  }
+  spr.fillRect(8, 17, 3, 3, acc);
+  for (int p = 0; p < N_SECTIONS; p++) {
+    int px = W / 2 - (N_SECTIONS * 6) / 2 + p * 6;
+    spr.fillRect(px, 20, p == s_menuSel ? 4 : 2, 2, p == s_menuSel ? acc : lineCol);
   }
 
-  // 5 cards visible; with more sections the strip scrolls with the selection
-  const int VIS = min(N_SECTIONS, 5);
-  const int gap = 5, cw = (W - 12 - gap * (VIS - 1)) / VIS, ch = 128, y0 = 24;
-  int x0 = (W - (cw * VIS + gap * (VIS - 1))) / 2;
-  static int first = 0;
-  if (s_menuSel < first) first = s_menuSel;
-  if (s_menuSel > first + VIS - 1) first = s_menuSel - VIS + 1;
-  if (first > 0) spr.fillTriangle(1, y0 + ch / 2, 5, y0 + ch / 2 - 5, 5, y0 + ch / 2 + 5, acc);           // more on the left
-  if (first + VIS < N_SECTIONS) spr.fillTriangle(W - 2, y0 + ch / 2, W - 6, y0 + ch / 2 - 5, W - 6, y0 + ch / 2 + 5, acc);
-  for (int i = first; i < first + VIS; i++) {
-    const Section* s = SECTIONS[i];
-    bool sel = (i == s_menuSel);
-    int x = x0 + (i - first) * (cw + gap), cx = x + cw / 2;
-    uint16_t pbg = sel ? C_SELBG() : bg;
-    if (sel) hudPanel(x, y0, cw, ch, 12, pbg, true, bg);
-    hudPanel(x, y0, cw, ch, 12, sel ? acc : UI_LINE(), false, bg);
-    s->icon(cx, y0 + 30, sel ? (themeKurenai() ? C_SELFG() : acc) : C(110, 110, 125), pbg);
-    char title[40]; utf8Upper(LT(s->title), title, sizeof title);
-    spr.setTextDatum(TC_DATUM);
-    spr.setTextColor(sel ? C_SELFG() : steel);
-    txt(title, cx, y0 + 62, txtW(title, 2) <= cw - 4 ? 2 : txtW(title, 1) <= cw - 4 ? 1 : 8);   // long title: smaller font
-    char sub[48], big[40], small[40];
-    s->subtitle(sub, sizeof(sub));
-    splitSubtitle(sub, big, small, sizeof(big));
-    bool alertish = (strcmp(small, L("NO CHIP", "НЕТ ЧИПА")) == 0);
-    spr.setTextColor(alertish ? C_ALERT() : (sel ? C_SELACC() : steel));
-    { char bf[40]; fitText(big, bf, sizeof bf, cw - 4, 4); txt(bf, cx, y0 + 82, 4); }
-    spr.setTextColor(sel && themeKurenai() ? UI_LINE() : dim);
-    char sm[40]; fitText(small, sm, sizeof sm, cw - 4, 8);   // as much as fits (UTF-8 aware)
-    txt(sm, cx, y0 + 108, 8);
-  }
+  // ---- Left & Right Flanking Wings (prev / next sections) ----
+  int prevIdx = (s_menuSel - 1 + N_SECTIONS) % N_SECTIONS;
+  int nextIdx = (s_menuSel + 1) % N_SECTIONS;
+  drawWingCard(6 + gx / 3, 35, 72, 102, SECTIONS[prevIdx], true, bg, lineCol, dim, labelCol, acc);
+  drawWingCard(W - 78 + gx / 3, 35, 72, 102, SECTIONS[nextIdx], false, bg, lineCol, dim, labelCol, acc);
 
-  // telemetry: uptime
+  // ---- Central Sacred Focal Altar (active section) ----
+  const Section* s = SECTIONS[s_menuSel];
+  int cw = 152, ch = 124, xC = (W - cw) / 2 + gx, yC = 25, cx = xC + cw / 2;
+  uint16_t pbg = C_SELBG(), fg = C_SELFG(), sAcc = C_SELACC();
+  uint16_t haloDim = themeKurenai() ? scale565(sAcc, 45) : lineCol;
+
+  hudPanel(xC, yC, cw, ch, 13, pbg, true, bg);
+  hudPanel(xC, yC, cw, ch, 13, acc, false, bg);
+  if (!themeKurenai()) spr.fillRect(xC + 14, yC + 2, 48, 2, acc);
+
+  // Inner NERV tactical corner reticles
+  spr.drawFastHLine(xC + 6, yC + ch - 6, 8, sAcc);
+  spr.drawFastVLine(xC + 6, yC + ch - 14, 8, sAcc);
+  spr.drawFastHLine(xC + cw - 14, yC + ch - 6, 8, sAcc);
+  spr.drawFastVLine(xC + cw - 7, yC + ch - 14, 8, sAcc);
+
+  // Section index tag (top-left of altar) & authentic 16x30 天眼 Hanko stamp (top-right)
+  snprintf(buf, sizeof(buf), "SEC·%02d", s_menuSel + 1);
+  spr.setTextDatum(TL_DATUM);
+  spr.setTextColor(themeKurenai() ? sAcc : dim);
+  txt(buf, xC + 10, yC + 8, 1);
+  drawMiniSeal(xC + cw - 24, yC + 7, C_SEAL(), pbg);
+
+  // Enso + Dharma Compass Halo around active icon
+  drawEnsoHalo(cx, yC + 30, 19, sAcc, haloDim);
+  s->icon(cx, yC + 30, themeKurenai() ? fg : acc, pbg);
+
+  // Active Section Title
+  char title[40], fitT[40];
+  utf8Upper(LT(s->title), title, sizeof title);
+  int tFont = txtW(title, 2) <= cw - 20 ? 2 : 1;
+  fitText(title, fitT, sizeof fitT, cw - 16, tFont);
+  spr.setTextDatum(TC_DATUM);
+  spr.setTextColor(fg);
+  txt(fitT, cx, yC + 58, tFont);
+
+  // Subtle horizontal altar hairline with center diamond
+  spr.drawFastHLine(xC + 18, yC + 75, cw - 36, haloDim);
+  spr.fillRect(cx - 1, yC + 74, 3, 3, sAcc);
+
+  // Live Hero Metric + Unit Caption
+  char sub[48], big[40], small[40], bf[40], sm[40];
+  s->subtitle(sub, sizeof(sub));
+  splitSubtitle(sub, big, small, sizeof(big));
+  bool alertish = (strcmp(small, L("NO CHIP", "НЕТ ЧИПА")) == 0);
+  fitText(big, bf, sizeof bf, cw - 16, 4);
+  spr.setTextColor(alertish ? C_ALERT() : sAcc);
+  txt(bf, cx, yC + 80, 4);
+
+  fitText(small, sm, sizeof sm, cw - 16, 1);
+  spr.setTextColor(themeKurenai() ? fg : labelCol);
+  txt(sm, cx, yC + 108, 1);
+
+  // ---- Bottom Tactical Footer ----
   uint32_t t = millis() / 1000;
   snprintf(buf, sizeof(buf), "T+%02lu:%02lu:%02lu", (unsigned long)(t / 3600), (unsigned long)(t / 60 % 60), (unsigned long)(t % 60));
   spr.setTextDatum(BL_DATUM);
   spr.setTextColor(dim);
-  txt(L("CLICK: OPEN · SIDE: POWER", "НАЖАТЬ: ОТКРЫТЬ · БОК: ПИТАНИЕ"), 8, H - 4, 1);
+  txt(L("WHEEL: SELECT · CLICK: OPEN", "КОЛЕСО: ВЫБОР · НАЖАТЬ: ВХОД"), 8, H - 3, 1);
   spr.setTextDatum(BR_DATUM);
   spr.setTextColor(acc);
-  txt(buf, W - 8, H - 4, 1);
+  txt(buf, W - 8, H - 3, 1);
   present();
 }
 

@@ -49,9 +49,13 @@ bool irFeed(const uint16_t* d, int n, uint32_t now);
 bool irDecode(const uint16_t* d, int n, IrCode& out);
 const char* irBrand(const IrCode& c);
 
-bool irStart();                       // start the receiver (section open or tablet watching)
-void irStop();
+void irBegin();                       // start background IR receiver at boot (for emergency IR trigger)
+bool irStart();                       // enter IR inspect mode (section open or tablet watching)
+void irStop();                        // leave IR inspect mode (keeps background receiver running)
 void irTick(uint32_t now);
+void irPollBg(uint32_t now);          // background poll from main loop()
+void irEvilSetLearn(bool on);         // true while Settings -> Emergency is open (binds next IR button)
+void irEvilLabel(char* out, size_t n);// human-readable status of the bound IR trigger button
 void irJson(String& o);               // last burst for the tablet (SSE event "ir")
 
 void drawIr(uint32_t now);

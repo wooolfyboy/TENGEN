@@ -19,13 +19,18 @@
 
 struct SensorReading {
   bool  hasT = false, hasH = false, hasB = false, hasP = false, hasCO2 = false;
+  bool  hasDoor = false, doorOpen = false;
+  bool  hasMotion = false, motion = false;
+  bool  hasLeak = false, leak = false;
+  bool  hasLux = false;
   float temp = 0;      // °C
   float hum  = 0;      // %
   int   batt = 0;      // %
   float press = 0;     // hPa
   int   co2 = 0;       // ppm
+  float lux = 0;       // lx
   const char* model = "";
-  bool any() const { return hasT || hasH || hasP || hasCO2; }
+  bool any() const { return hasT || hasH || hasP || hasCO2 || hasDoor || hasMotion || hasLeak || hasLux; }
 };
 
 static inline int16_t s16le(const uint8_t* p) { return (int16_t)(p[0] | (p[1] << 8)); }
@@ -88,7 +93,11 @@ static inline bool parseBTHome(const uint8_t* d, uint8_t n, SensorReading& r) {
       case 0x03: r.hum  = u16le(v) / 100.0f; r.hasH = true; break;
       case 0x2E: r.hum  = v[0];              r.hasH = true; break;
       case 0x04: r.press = (v[0] | (v[1] << 8) | ((uint32_t)v[2] << 16)) / 100.0f; r.hasP = true; break;
+      case 0x05: r.lux = (v[0] | (v[1] << 8) | ((uint32_t)v[2] << 16)) / 100.0f; r.hasLux = true; break;
       case 0x12: r.co2 = u16le(v); r.hasCO2 = true; break;
+      case 0x1A: case 0x2D: r.doorOpen = v[0] != 0; r.hasDoor = true; break;   // door / window
+      case 0x20: r.leak = v[0] != 0; r.hasLeak = true; break;                  // moisture / leak
+      case 0x21: r.motion = v[0] != 0; r.hasMotion = true; break;              // motion
     }
     i += L;
   }
@@ -119,6 +128,9 @@ static inline bool parseMiBeacon(const uint8_t* d, uint8_t n, SensorReading& r) 
       case 0x100A: if (L >= 1) { r.batt = v[0]; r.hasB = true; } break;
       case 0x100D: if (L >= 4) { r.temp = s16le(v) / 10.0f; r.hum = u16le(v + 2) / 10.0f;
                                  r.hasT = r.hasH = true; } break;
+      case 0x1007: if (L >= 3) { r.lux = (float)(v[0] | (v[1] << 8) | ((uint32_t)v[2] << 16)); r.hasLux = true; } break;
+      case 0x1019: if (L >= 1) { r.doorOpen = (v[0] == 0); r.hasDoor = true; } break;
+      case 0x000F: if (L >= 1) { r.motion = (v[0] != 0); r.hasMotion = true; } break;
     }
     i += L;
   }

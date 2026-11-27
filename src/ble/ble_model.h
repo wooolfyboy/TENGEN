@@ -23,7 +23,7 @@ static const int      ORDER_HYST_DB = 8;            // swap only if the differen
 static const uint32_t ORDER_EVERY   = 2000;         // how often to refresh the order
 static const uint32_t ORDER_FREEZE  = 4000;         // order freezes after a wheel touch
 
-enum { M_OVERVIEW = 0, M_SCOPE, M_CITY, M_NEAREST, M_LIST, M_WEATHER, NUM_MODES };
+enum { M_OVERVIEW = 0, M_SCOPE, M_NEAREST, M_LIST, M_WEATHER, NUM_MODES };
 enum { V_PRIV = 0, V_OTHER = 1 };                   // 2.. = brands from BRANDS (vendors.h)
 enum { A_PUBLIC = 0, A_STATIC, A_ROTATING, A_NONRES };   // address kinds
 
@@ -57,6 +57,19 @@ struct Dev {
   uint16_t uuids[4]; // services
   uint8_t  nU;
   char     name[20];
+  // Deep packet & behavioral intelligence
+  uint8_t  flags;    // DF_* bitmask (active, moving, separated, lidOpen, inEar, hotspot, pairing, hasTx)
+  int8_t   txPwr;    // AD 0x0A TX Power Level in dBm (127 = unknown)
+  uint8_t  bat;      // 0..100 overall battery (255 = unknown)
+  uint8_t  batL;     // AirPods left (0..100, 255 = unknown)
+  uint8_t  batR;     // AirPods right
+  uint8_t  batC;     // AirPods case
+  float    rssiJit;  // EWMA of |rssi - rssiF| (dB) for motion detection
+  uint32_t rateMs;   // rolling 4s packet-rate window start
+  uint16_t rateCnt;  // packets in current window
+  uint8_t  pps10;    // packets/sec * 10 (e.g. 35 = 3.5 pkt/s)
+  char     model[22];// decoded model (AirPods Pro 2, WH-1000XM5, etc.)
+  char     state[24];// decoded live state (Screen on, Case open, Separated!, etc.)
 };
 // Ent = physical device (aggregate over its addresses)
 struct Ent {
@@ -68,6 +81,12 @@ struct Ent {
   uint64_t key;      // key of the freshest address
   char     name[20];
   char     label[21]; // label set by the user on the tablet (UTF-8, may be empty)
+  uint8_t  flags;
+  int8_t   txPwr;    // 127 = unknown
+  uint8_t  bat, batL, batR, batC;
+  uint8_t  pps10;
+  char     model[22];
+  char     state[24];
 };
 // weather sensor
 struct Sensor {
@@ -105,8 +124,6 @@ extern int      g_sparkN;
 float       estDistance(int rssi);
 void drawOverview(int count, int raw, const int* typeCnt);
 void drawScope(const std::vector<Blip>& bl);
-void drawCity(const std::vector<Blip>& bl, uint32_t now);   // 3D: devices are towers
-void cityTurn(int dir);                                      // wheel: turn the camera
 void drawNearest(bool have, int rssi, const Ent& best, int count);
 void drawList(const std::map<uint32_t, Ent>& ents);
 void drawDetail(const Dev& d, const Ent& e, bool inMap, uint32_t now);

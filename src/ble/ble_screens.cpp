@@ -143,59 +143,121 @@ void drawOverview(int count, int raw, const int* typeCnt) {
 }
 
 // ============================================================
-//  SCOPE — radar: distance from signal strength, angle is arbitrary
+//  SCOPE — Evangelion AT-Field Octagram × Zen Enso Sanctuary Radar
 // ============================================================
 void drawScope(const std::vector<Blip>& bl) {
   int W = spr.width();
-  char buf[24];
+  char buf[32];
   spr.fillSprite(C_BG());
-  snprintf(buf, sizeof(buf), "%d %s", (int)bl.size(), PL((int)bl.size(), "device", "devices", "устройство", "устройства", "устройств"));
-  uiHeader(L("Scope", "Радар"), buf);
+  bool hasTrk = false;
+  for (size_t i = 0; i < bl.size(); i++) if (bl[i].type == T_TRACKER) { hasTrk = true; break; }
+  snprintf(buf, sizeof(buf), hasTrk ? L("%d · TRACKER!", "%d · ТРЕКЕР!") : "%d %s",
+           (int)bl.size(), PL((int)bl.size(), "device", "devices", "устройство", "устройства", "устройств"));
+  uiHeader(L("Scope", "Радар"), buf, hasTrk);
 
-  int maxR = 62, cx = W - UI_M - 6 - maxR, cy = UI_TOP + 2 + maxR;
-  uint16_t ring = UI_LINE();
-  for (int k = 1; k <= 3; k++) spr.drawCircle(cx, cy, maxR * k / 3, ring);
+  // Right: Octagonal AT-Field + Enso Radar
+  int maxR = 59, cx = W - UI_M - 8 - maxR, cy = UI_TOP + 63;
+  uint16_t ring = UI_LINE(), acc = C_ACC(), hot = C_HOT();
+
+  // Outer 8-vertex Evangelion AT-Field octagram frame
+  for (int k = 0; k < 8; k++) {
+    float a0 = (k * 45.0f + 22.5f) * PI / 180.0f, a1 = ((k + 1) * 45.0f + 22.5f) * PI / 180.0f;
+    int rOct = maxR + 3;
+    spr.drawLine(cx + (int)lroundf(cosf(a0) * rOct), cy + (int)lroundf(sinf(a0) * rOct),
+                 cx + (int)lroundf(cosf(a1) * rOct), cy + (int)lroundf(sinf(a1) * rOct),
+                 hasTrk ? C_ALERT() : scale565(acc, 65));
+  }
+  // 24 precision azimuth compass ticks
+  for (int d = 0; d < 360; d += 15) {
+    float a = d * PI / 180.0f;
+    int r0 = maxR, r1 = (d % 90 == 0) ? maxR + 5 : maxR + 2;
+    spr.drawLine(cx + (int)lroundf(cosf(a) * r0), cy + (int)lroundf(sinf(a) * r0),
+                 cx + (int)lroundf(cosf(a) * r1), cy + (int)lroundf(sinf(a) * r1),
+                 (d % 90 == 0) ? acc : ring);
+  }
+  // Concentric range circles + diagonal Dharma axes
+  for (int k = 1; k <= 3; k++) spr.drawCircle(cx, cy, maxR * k / 3, k == 3 ? scale565(acc, 55) : ring);
   spr.drawFastHLine(cx - maxR, cy, 2 * maxR, ring);
   spr.drawFastVLine(cx, cy - maxR, 2 * maxR, ring);
-  // beam trail: lines fade
-  for (int t = 0; t < 36; t++) {
+  int diag = (int)(maxR * 0.707f);
+  spr.drawLine(cx - diag, cy - diag, cx + diag, cy + diag, scale565(ring, 65));
+  spr.drawLine(cx - diag, cy + diag, cx + diag, cy - diag, scale565(ring, 65));
+
+  // Volumetric phosphor sweep fan + bright leading blade
+  for (int t = 1; t < 44; t++) {
     float a = (g_sweep - t) * PI / 180.0f;
-    float k = 1.0f - t / 36.0f;
-    spr.drawLine(cx, cy, cx + (int)(cosf(a) * maxR), cy + (int)(sinf(a) * maxR), heatV(0.15f + 0.55f * k * k));
+    float k = 1.0f - t / 44.0f;
+    spr.drawLine(cx, cy, cx + (int)(cosf(a) * (maxR - 1)), cy + (int)(sinf(a) * (maxR - 1)), heatV(0.12f + 0.52f * k * k));
   }
+  {
+    float a0 = g_sweep * PI / 180.0f;
+    spr.drawLine(cx, cy, cx + (int)(cosf(a0) * maxR), cy + (int)(sinf(a0) * maxR), hot);
+  }
+  // Central Tengen Eye diamond
+  spr.fillRect(cx - 1, cy - 1, 3, 3, acc);
+
   spr.setTextDatum(TL_DATUM);
   spr.setTextColor(UI_DIM());
   txt("1M", cx + 3, cy - maxR / 3 + 2, 1);
   txt("5M", cx + 3, cy - 2 * maxR / 3 + 2, 1);
 
-  // targets: weak below, strong on top; tags = alert
-  static std::vector<int> idx;                         // static: no allocation every frame
+  // Targets: weak below, strong on top; sweep hit draws hexagonal/diamond ping halo
+  static std::vector<int> idx;
   idx.resize(bl.size());
   for (size_t i = 0; i < bl.size(); i++) idx[i] = (int)i;
   std::sort(idx.begin(), idx.end(), [&](int a, int b) { return bl[a].rssi < bl[b].rssi; });
   for (int i : idx) {
-    float ang = (bl[i].h % 360) * PI / 180.0f;
+    int deg = (int)(bl[i].h % 360);
+    float ang = deg * PI / 180.0f;
     int pct = constrain((bl[i].rssi + 95) * 100 / 50, 0, 100);
-    int r = maxR - (maxR - 6) * pct / 100;
-    drawMarker(cx + (int)(cosf(ang) * r), cy + (int)(sinf(ang) * r), heat(bl[i].rssi), bl[i].type == T_TRACKER);
+    int r = maxR - (maxR - 7) * pct / 100;
+    int tx = cx + (int)(cosf(ang) * r), ty = cy + (int)(sinf(ang) * r);
+    bool trk = (bl[i].type == T_TRACKER);
+    int since = (g_sweep - deg + 360) % 360;
+    if (since < 36) {
+      int pr = 4 + since / 9;
+      uint16_t pc = trk ? C_ALERT() : acc;
+      spr.drawLine(tx, ty - pr, tx + pr, ty, pc);
+      spr.drawLine(tx + pr, ty, tx, ty + pr, pc);
+      spr.drawLine(tx, ty + pr, tx - pr, ty, pc);
+      spr.drawLine(tx - pr, ty, tx, ty - pr, pc);
+    }
+    drawMarker(tx, ty, heat(bl[i].rssi), trk);
   }
 
-  // legend: how many of each type
+  // Left: Chamfered MAGI Tactical Class Breakdown Panel
+  int px = UI_M, py = UI_TOP + 2, pw = cx - maxR - UI_M - 12, ph = UI_BOTTOM - py - 2;
+  hudPanel(px, py, pw, ph, 8, UI_LINE(), false, C_BG());
+  spr.fillRect(px + 8, py, 32, 2, hasTrk ? C_ALERT() : acc);
+  spr.setTextDatum(TL_DATUM);
+  spr.setTextColor(acc);
+  txt(L("// ETHER CLASSES", "// КЛАССЫ ЭФИРА"), px + 7, py + 5, 1);
+
   int cnt[T_NUM] = {0};
   for (size_t i = 0; i < bl.size(); i++) cnt[bl[i].type < T_NUM ? (int)bl[i].type : 0]++;
   int order[T_NUM];
   int n = sortedTypes(cnt, order);
-  for (int i = 0; i < n && i < 7; i++) {
-    int t = order[i], y = UI_TOP + 8 + i * 17;
+  int maxC = n > 0 ? max(1, cnt[order[0]]) : 1;
+  if (n == 0) {
+    spr.setTextColor(UI_DIM());
+    txt(L("LISTENING...", "СЛУШАЮ ЭФИР..."), px + 7, py + 24, 1);
+  }
+  for (int i = 0; i < n && i < 6; i++) {
+    int t = order[i], y = py + 23 + i * 17;
     bool alert = (t == T_TRACKER);
-    drawGlyph(UI_M + 12, y, typeGlyph(t), alert ? C_ALERT() : UI_LABEL(), alert);
-    char nm[16]; upperCopy(typeName(t), nm, sizeof(nm));
+    drawGlyph(px + 12, y, typeGlyph(t), alert ? C_ALERT() : UI_LABEL(), alert);
+    char nm[16], fitN[16]; upperCopy(typeName(t), nm, sizeof(nm));
+    fitText(nm, fitN, sizeof(fitN), pw - 66, 1);
     spr.setTextDatum(ML_DATUM);
     spr.setTextColor(alert ? C_ALERT() : UI_LABEL());
-    txt(nm, UI_M + 22, y + 1, 1);
+    txt(fitN, px + 21, y, 1);
+    // Mini segmented bar
+    int bx0 = px + pw - 42, bw0 = 18, fillW = max(2, bw0 * cnt[t] / maxC);
+    spr.fillRect(bx0, y - 2, bw0, 4, ring);
+    spr.fillRect(bx0, y - 2, fillW, 4, alert ? C_ALERT() : acc);
     spr.setTextDatum(MR_DATUM);
-    spr.setTextColor(alert ? C_ALERT() : C_HOT());
-    txtNum(cnt[t], UI_M + 100, y, 2);
+    spr.setTextColor(alert ? C_ALERT() : hot);
+    txtNum(cnt[t], px + pw - 6, y, 2);
   }
   uiFooter(L("wheel: screens", "колесо: экраны"), L("side: back", "кнопка: назад"));
   present();
@@ -277,22 +339,28 @@ void drawList(const std::map<uint32_t, Ent>& ents) {
       continue;
     }
     const Ent& e = it->second;
-    bool alert = (e.type == T_TRACKER);
-    drawGlyph(UI_M + 8, cy, typeGlyph(e.type), alert ? C_ALERT() : UI_LABEL(), alert);
-    const char* nm = e.label[0] ? e.label : e.name[0] ? e.name : typeName(e.type);
+    bool sep = (e.flags & DF_SEPARATED) != 0;
+    bool alert = (e.type == T_TRACKER) || sep;
+    drawGlyph(UI_M + 8, cy, typeGlyph(e.type), alert ? C_ALERT() : (sel ? C_ACC() : UI_LABEL()), alert);
+    const char* nm = e.label[0] ? e.label : e.name[0] ? e.name : e.model[0] ? e.model : typeName(e.type);
     int nf = fontFor(nm, 2);
-    fitText(nm, buf, sizeof(buf), 124, nf);
+    fitText(nm, buf, sizeof(buf), 112, nf);
     spr.setTextDatum(ML_DATUM);
-    spr.setTextColor(alert ? C_ALERT() : (e.label[0] || e.name[0] ? C_HOT() : UI_LABEL()));
+    spr.setTextColor(alert ? C_ALERT() : (sel || e.label[0] || e.name[0] ? C_HOT() : UI_LABEL()));
     txt(buf, UI_M + 18, cy, nf);
-    char vb[16];
-    fitText(vendorLabel(e.cat, e.vkind, e.vcode), vb, sizeof(vb), 78, 2);
-    spr.setTextColor(UI_DIM());
-    txt(vb, 156, cy, 2);
+    char vb[20];
+    fitText(vendorLabel(e.cat, e.vkind, e.vcode), vb, sizeof(vb), 56, 1);
+    spr.setTextColor((e.flags & DF_ACTIVE) ? C_ACC() : UI_DIM());
+    txt(vb, 136, cy, 1);
+    float dist = estDistance(e.rssi);
+    if (dist < 10.0f) snprintf(buf, sizeof(buf), "~%.1fm", dist);
+    else              snprintf(buf, sizeof(buf), "~%.0fm", dist);
+    spr.setTextColor(UI_LABEL());
+    txt(buf, 196, cy, 1);
     spr.setTextDatum(MR_DATUM);
-    spr.setTextColor(heat(e.rssi));
-    txtNum(e.rssi, 266, cy, 2);
-    drawBars(274, cy - 7, e.rssi, heat(e.rssi));
+    spr.setTextColor(alert ? C_ALERT() : heat(e.rssi));
+    txtNum(e.rssi, 268, cy, 2);
+    drawBars(274, cy - 7, e.rssi, alert ? C_ALERT() : heat(e.rssi));
   }
   int n = (int)g_order.size();                     // scrollbar
   if (n > LIST_ROWS) {
@@ -358,15 +426,38 @@ void drawDetail(const Dev& d, const Ent& e, bool inMap, uint32_t now) {
   txt(L("SIGNAL · 30 S", "СИГНАЛ · 30 С"), gx + 5, gy + 3, 1);
   drawSpark(gx, gy, gw, gh, g_spark, g_sparkN, SPARK_N, heat(e.rssi));
 
-  // technical details
+  // technical details + decoded passive intelligence (3 strict 10px lines, fitted to width -> 0 overlap)
   int y = UI_TOP + 98;
+  int maxW = W - 2 * UI_M - 16;
+  int n = 0;
+  auto addN = [&](int w) { if (w > 0) n += min(w, (int)sizeof(buf) - 1 - n); };
+  buf[0] = 0;
+  if (e.flags & DF_SEPARATED) addN(snprintf(buf + n, sizeof(buf) - n, "%s ", L("SEPARATED TAG!", "ЧУЖАЯ МЕТКА!")));
+  if (e.model[0]) addN(snprintf(buf + n, sizeof(buf) - n, "%s ", e.model));
+  if (e.batL <= 100 || e.batR <= 100 || e.batC <= 100) {
+    if (e.batL <= 100) addN(snprintf(buf + n, sizeof(buf) - n, "L%d ", e.batL));
+    if (e.batR <= 100) addN(snprintf(buf + n, sizeof(buf) - n, "R%d ", e.batR));
+    if (e.batC <= 100) addN(snprintf(buf + n, sizeof(buf) - n, "C%d ", e.batC));
+  } else if (e.bat <= 100) {
+    addN(snprintf(buf + n, sizeof(buf) - n, "BAT %d%% ", e.bat));
+  }
+  if (e.state[0] && !(e.flags & DF_SEPARATED)) addN(snprintf(buf + n, sizeof(buf) - n, "%s ", e.state));
+  if (e.flags & DF_ACTIVE) addN(snprintf(buf + n, sizeof(buf) - n, "%s ", L("ACT", "АКТ")));
+  if (e.flags & DF_MOVING) addN(snprintf(buf + n, sizeof(buf) - n, "%s ", L("MOV", "ДВИЖ")));
+  if (e.txPwr != 127) addN(snprintf(buf + n, sizeof(buf) - n, "TX%+d", e.txPwr));
+
+  if (buf[0]) {
+    upperCopy(buf, bu, sizeof(bu));
+    fitText(bu, tmp, sizeof(tmp), maxW, 1);
+    spr.setTextColor((e.flags & DF_SEPARATED) ? C_ALERT() : C_ACC());
+    txt(tmp, x0, y, 1); y += 10;
+  }
   macStr(d.mac, tmp);
   snprintf(buf, sizeof(buf), "MAC %s  %s", tmp, akindName(d.akind));
   upperCopy(buf, bu, sizeof(bu));
+  fitText(bu, tmp, sizeof(tmp), maxW, 1);
   spr.setTextColor(UI_DIM());
-  txt(bu, x0, y, 1); y += 10;
-  int n = 0;
-  auto addN = [&](int w) { if (w > 0) n += min(w, (int)sizeof(buf) - 1 - n); };
+  txt(tmp, x0, y, 1); y += 10;
   if (d.nU) {
     n = 0; buf[0] = 0; addN(snprintf(buf, sizeof(buf), "SVC"));
     for (uint8_t i = 0; i < d.nU && n < 46; i++) {
@@ -375,14 +466,15 @@ void drawDetail(const Dev& d, const Ent& e, bool inMap, uint32_t now) {
       addN(snprintf(buf + n, sizeof(buf) - (size_t)n, nm[0] ? " %04X %s" : " %04X", d.uuids[i], nm));
     }
     upperCopy(buf, bu, sizeof(bu));
-    txt(bu, x0, y, 1); y += 10;
-  }
-  if (d.hasCid) {
+    fitText(bu, tmp, sizeof(tmp), maxW, 1);
+    txt(tmp, x0, y, 1);
+  } else if (d.hasCid) {
     n = 0; buf[0] = 0; addN(snprintf(buf, sizeof(buf), "MFR %02X %02X |", d.cid & 0xFF, d.cid >> 8));
     int shown = d.mfrLen < 6 ? d.mfrLen : 6;
     for (int i = 0; i < shown; i++) addN(snprintf(buf + n, sizeof(buf) - (size_t)n, " %02X", d.mfr[i]));
     addN(snprintf(buf + n, sizeof(buf) - (size_t)n, "%s  LEN %d", d.mfrLen > 6 ? " .." : "", d.mfrLen));
-    txt(buf, x0, y, 1);
+    fitText(buf, tmp, sizeof(tmp), maxW, 1);
+    txt(tmp, x0, y, 1);
   }
   present();
 }
@@ -445,8 +537,12 @@ void drawWeather(const std::vector<Sensor>& ss, uint32_t now) {
     int ex = 200;
     spr.setTextDatum(TL_DATUM);
     spr.setTextColor(UI_LABEL());
-    if (S.r.hasP)   { snprintf(buf, sizeof(buf), L("%.0f hPa", "%.0f гПа"), S.r.press); txt(buf, ex, vy + 5, 2); }
+    if (S.r.hasP)        { snprintf(buf, sizeof(buf), L("%.0f hPa", "%.0f гПа"), S.r.press); txt(buf, ex, vy + 5, 2); }
     else if (S.r.hasCO2) { snprintf(buf, sizeof(buf), "%d ppm", S.r.co2); txt(buf, ex, vy + 5, 2); }
+    else if (S.r.hasLeak && S.r.leak) { spr.setTextColor(C_ALERT()); txt(L("LEAK!", "ПРОТЕЧКА!"), ex, vy + 5, 2); }
+    else if (S.r.hasDoor) { spr.setTextColor(S.r.doorOpen ? C_ALERT() : C_ACC()); txt(S.r.doorOpen ? L("OPEN", "ОТКР") : L("CLOSED", "ЗАКР"), ex, vy + 5, 2); }
+    else if (S.r.hasMotion) { spr.setTextColor(S.r.motion ? C_ALERT() : UI_DIM()); txt(S.r.motion ? L("MOTION", "ДВИЖ") : L("STILL", "ТИХО"), ex, vy + 5, 2); }
+    else if (S.r.hasLux) { snprintf(buf, sizeof(buf), "%.0f lx", S.r.lux); txt(buf, ex, vy + 5, 2); }
   }
   if (pages > 1) {                                   // sensor pages: number in the header
     snprintf(buf, sizeof(buf), L("%d sensors  ·  %d/%d", "%d датч.  ·  %d/%d"), (int)ss.size(), page + 1, pages);

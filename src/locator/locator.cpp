@@ -67,6 +67,7 @@ struct LocNode {
   float    targetX, targetZ; // deadband-stabilized target coordinates
   float    x, z, err;        // smoothly gliding display coordinates (meters)
   uint8_t  rawType;
+  int8_t   txPwr;          // AD 0x0A TX Power Level (127 = unknown)
   char     type[16];
   char     vendor[24];
   char     name[24];
@@ -96,9 +97,14 @@ static uint32_t  s_ackMs = 0;
 static uint32_t  s_calcMs = 0;
 static uint16_t  s_matchedCnt = 0;
 
-// Calibration parameters persisted in NVS
+// Calibration & Static Reference Anchor parameters persisted in NVS
 static float     s_baseM = 3.0f;       // distance between Stick #1 and Stick #2 in meters
-static int       s_offsetDb = 6;       // added to Ear #2 RSSI to match T-Embed antenna sensitivity
+static int       s_offsetDb = 6;       // base antenna sensitivity offset (Ear #2 -> T-Embed)
+static float     s_liveOfs = 6.0f;     // smoothly tracked differential offset from the static Anchor
+static float     s_envShift = 0.0f;    // common-mode room RF drift tracked from the static Anchor
+static uint32_t  s_anchorId = 0;       // static reference Anchor device ID (pinned at center 0, s_anchorZ)
+static float     s_anchorZ = 0.65f;    // fixed depth of the Anchor in front of the baseline (meters)
+static float     s_anchorMean = -60.0f;// Anchor's baseline average RSSI at calibration time
 static bool      s_prefsLoaded = false;
 static uint32_t  s_calToastMs = 0;
 static char      s_calMsg[40] = "";
@@ -112,6 +118,7 @@ static void loadPrefs() {
     if (!(s_baseM >= 0.5f && s_baseM <= 15.0f)) s_baseM = 3.0f;
     s_offsetDb = p.getInt("ofs", 6);
     if (s_offsetDb < -25 || s_offsetDb > 25) s_offsetDb = 6;
+    s_liveOfs = (float)s_offsetDb;
     p.end();
   }
 }
@@ -129,29 +136,36 @@ static void savePrefs() {
 static float txRefForType(uint8_t rawType) {
   switch (rawType) {
     case T_COMPUTER:
-    case T_TV:      return -53.5f;
-    case T_PHONE:   return -58.0f;
-    case T_AUDIO:   return -60.5f;
+    case T_TV:      return -55.0f;
+    case T_PHONE:   return -58.5f;
+    case T_AUDIO:   return -61.5f;
     case T_WATCH:   return -63.0f;
     case T_TRACKER: return -62.5f;
-    default:        return -58.5f;
+    default:        return -59.0f;
   }
 }
 
-// Convert sub-dB RSSI to indoor meters using device-class TX power & path-loss exponent n = 2.25
-static float rssiToMeters(float rssi, uint8_t rawType = 0) {
+// Convert sub-dB RSSI to indoor meters using device-class reference + gentle TX power trim
+// + live common-mode room drift compensation from the static Anchor.
+// Note: tiny earbuds/watches often advertise high conducted chip TX (+8..+12 dBm) despite
+// low-efficiency miniature antennas, so TX power is clamped to a gentle +-3 dB trim.
+static float rssiToMeters(float rssi, uint8_t rawType = 0, int8_t txPwr = 127) {
   float ref = txRefForType(rawType);
-  float d = powf(10.0f, (ref - rssi) / (10.0f * 2.25f));
+  if (txPwr >= -40 && txPwr <= 20) {
+    ref += constrain((float)txPwr * 0.25f, -3.0f, 3.0f);
+  }
+  float adjRssi = rssi - s_envShift;
+  float d = powf(10.0f, (ref - adjRssi) / (10.0f * 2.25f));
   return constrain(d, 0.20f, 14.0f);
 }
 
 // 1D Anti-Multipath Kalman update: rejects single-channel destructive fade drops (>6 dB dip)
-// while gliding smoothly with sub-dB precision.
+// and keeps stationary devices calm while still tracking real walking within ~1.5 s.
 static void kalmanRssi(float& est, float& var, float meas) {
   if (var <= 0.0f) { est = meas; var = 3.0f; return; }
   float diff = meas - est;
-  float Q = 0.18f;
-  float R = (diff < -6.0f) ? 28.0f : (diff < -2.0f) ? 9.0f : 3.8f;
+  float Q = 0.06f;
+  float R = (diff < -6.0f) ? 32.0f : (diff < -2.0f) ? 12.0f : 6.5f;
   var += Q;
   float K = var / (var + R);
   est += K * diff;
@@ -315,11 +329,20 @@ bool locCalibrate(String& out, uint32_t targetId) {
   }
   const LocNode& b = s_nodes[bestIdx];
   s_offsetDb = constrain((int)lroundf(b.r1F - b.r2RawF), -20, 25);
+  s_liveOfs = (float)s_offsetDb;
+  s_envShift = 0.0f;
+  // Pin this calibrated device as the Static Reference Anchor (0, s_anchorZ)
+  s_anchorId = b.id;
+  s_anchorMean = b.r1F;
+  float dEst = rssiToMeters(b.r1F, b.rawType, b.txPwr);
+  float halfD = max(1.0f, s_baseM) * 0.5f;
+  s_anchorZ = (dEst > halfD) ? sqrtf(dEst * dEst - halfD * halfD) : (0.35f + dEst * 0.25f);
+  s_anchorZ = constrain(s_anchorZ, 0.35f, 2.2f);
   savePrefs();
   // Immediately re-anchor r2F on all nodes so calibration takes effect without Kalman lag
   for (int i = 0; i < s_nNodes; i++) {
     if (s_nodes[i].has2) {
-      s_nodes[i].r2F = constrain(s_nodes[i].r2RawF + (float)s_offsetDb, -105.0f, -25.0f);
+      s_nodes[i].r2F = constrain(s_nodes[i].r2RawF + s_liveOfs, -105.0f, -25.0f);
       s_nodes[i].r2 = (int)lroundf(s_nodes[i].r2F);
       s_nodes[i].r2Var = 2.0f;
       s_nodes[i].targetZ = 0.0f;
@@ -365,8 +388,8 @@ static void recomputeNodes(uint32_t now) {
     int nMatches;
   } ctx = { now, matches, nMatches };
 
-  // 2. Update from T-Embed's full BLE scanner table (sub-dB precision)
-  bleForEachEnt([](uint32_t id, float rssiF, uint8_t rawType, const char* typeStr, const char* vendor, const char* name, const char* label, void* vctx) {
+  // 2. Update from T-Embed's full BLE scanner table (sub-dB precision + real TX Power)
+  bleForEachEnt([](uint32_t id, float rssiF, uint8_t rawType, const char* typeStr, const char* vendor, const char* name, const char* label, int8_t txPwr, void* vctx) {
     SeenCtx* c = (SeenCtx*)vctx;
     int idx = -1;
     for (int i = 0; i < s_nNodes; i++) if (s_nodes[i].id == id) { idx = i; break; }
@@ -375,6 +398,7 @@ static void recomputeNodes(uint32_t now) {
       idx = s_nNodes++;
       memset(&s_nodes[idx], 0, sizeof(LocNode));
       s_nodes[idx].id = id;
+      s_nodes[idx].txPwr = 127;
       s_nodes[idx].x = -s_baseM * 0.25f;
       s_nodes[idx].z = 1.5f;
       s_nodes[idx].err = 1.5f;
@@ -385,6 +409,7 @@ static void recomputeNodes(uint32_t now) {
     kalmanRssi(n.r1F, n.r1Var, rssiF);
     n.r1 = (int)lroundf(n.r1F);
     n.rawType = rawType;
+    if (txPwr != 127) n.txPwr = txPwr;
     strlcpy(n.type, typeStr ? typeStr : "device", sizeof(n.type));
     strlcpy(n.vendor, vendor ? vendor : "", sizeof(n.vendor));
     strlcpy(n.name, name ? name : "", sizeof(n.name));
@@ -396,7 +421,7 @@ static void recomputeNodes(uint32_t now) {
         n.has2 = true;
         n.seen2Ms = c->now;
         n.r2RawF = c->matches[k].r2RawF;
-        float calR2 = constrain(n.r2RawF + (float)s_offsetDb, -105.0f, -25.0f);
+        float calR2 = constrain(n.r2RawF + s_liveOfs, -105.0f, -25.0f);
         kalmanRssi(n.r2F, n.r2Var, calR2);
         n.r2 = (int)lroundf(n.r2F);
         c->matches[k].id = 0;
@@ -418,6 +443,7 @@ static void recomputeNodes(uint32_t now) {
       idx = s_nNodes++;
       memset(&s_nodes[idx], 0, sizeof(LocNode));
       s_nodes[idx].id = id;
+      s_nodes[idx].txPwr = 127;
       s_nodes[idx].x = s_baseM * 0.55f;
       s_nodes[idx].z = 1.5f;
       s_nodes[idx].err = 1.8f;
@@ -427,7 +453,7 @@ static void recomputeNodes(uint32_t now) {
     n.has2 = true;
     n.seen2Ms = now;
     n.r2RawF = matches[k].r2RawF;
-    float calR2 = constrain(n.r2RawF + (float)s_offsetDb, -105.0f, -25.0f);
+    float calR2 = constrain(n.r2RawF + s_liveOfs, -105.0f, -25.0f);
     kalmanRssi(n.r2F, n.r2Var, calR2);
     n.r2 = (int)lroundf(n.r2F);
     if (!n.rawType && matches[k].type) n.rawType = matches[k].type;
@@ -453,16 +479,40 @@ static void recomputeNodes(uint32_t now) {
   // so two nearby nodes NEVER swap indices and oscillate around each other!
   std::sort(s_nodes, s_nodes + s_nNodes, [](const LocNode& a, const LocNode& b) { return a.id < b.id; });
 
+  // 4a. Live Differential Drift Compensation from the Static Reference Anchor
+  if (s_anchorId != 0) {
+    for (int i = 0; i < s_nNodes; i++) {
+      const LocNode& an = s_nodes[i];
+      if (an.id == s_anchorId && an.has1 && an.has2) {
+        float measOfs = constrain(an.r1F - an.r2RawF, (float)s_offsetDb - 6.0f, (float)s_offsetDb + 6.0f);
+        s_liveOfs += (measOfs - s_liveOfs) * 0.04f;
+        float curMean = 0.5f * (an.r1F + an.r2F);
+        float measShift = constrain(curMean - s_anchorMean, -4.5f, 4.5f);
+        s_envShift += (measShift - s_envShift) * 0.04f;
+        break;
+      }
+    }
+  }
+
   float rawTx[MAX_LOC_NODES], rawTz[MAX_LOC_NODES], rawErr[MAX_LOC_NODES];
   for (int i = 0; i < s_nNodes; i++) {
     LocNode& n = s_nodes[i];
     float tx, tz, terr;
     float idPhase = ((n.id * 2654435761u) % 1000) / 1000.0f;
 
+    // Static Reference Anchor is pinned rock-solid at (0, s_anchorZ)
+    if (s_anchorId != 0 && n.id == s_anchorId && n.has1 && n.has2) {
+      matched++;
+      rawTx[i] = 0.0f;
+      rawTz[i] = s_anchorZ;
+      rawErr[i] = 0.15f;
+      continue;
+    }
+
     if (n.has1 && n.has2) {
       matched++;
-      float d1 = rssiToMeters(n.r1F, n.rawType);
-      float d2 = rssiToMeters(n.r2F, n.rawType);
+      float d1 = rssiToMeters(n.r1F, n.rawType, n.txPwr);
+      float d2 = rssiToMeters(n.r2F, n.rawType, n.txPwr);
       float sumD = d1 + d2;
 
       if (sumD <= D * 1.02f) {
@@ -487,29 +537,31 @@ static void recomputeNodes(uint32_t now) {
         float rMean = sqrtf(d1 * d2);
         float sinTh = tanhf((n.r2F - n.r1F) / 11.5f);
         float xHyp = sinTh * max(halfD, rMean * 0.85f);
-        tx = xTri * 0.65f + xHyp * 0.35f + (idPhase - 0.5f) * 0.08f;
-        tx = constrain(tx, -D * 1.35f, D * 1.35f);
+        float maxX = max(4.2f, D * 1.55f);
+        float maxZ = max(7.5f, D * 2.5f);
+        tx = xTri * 0.65f + xHyp * 0.35f + (idPhase - 0.5f) * 0.14f;
+        tx = constrain(tx, -maxX, maxX);
 
         float dx1 = tx + halfD, dx2 = tx - halfD;
         float z1 = sqrtf(max(0.06f, d1 * d1 - dx1 * dx1));
         float z2 = sqrtf(max(0.06f, d2 * d2 - dx2 * dx2));
         float w1 = 1.0f / (0.3f + d1), w2 = 1.0f / (0.3f + d2);
-        tz = (z1 * w1 + z2 * w2) / (w1 + w2) + (idPhase - 0.5f) * 0.06f;
-        tz = constrain(tz, 0.22f, D * 2.4f);
+        tz = (z1 * w1 + z2 * w2) / (w1 + w2) + (idPhase - 0.5f) * 0.12f;
+        tz = constrain(tz, 0.22f, maxZ);
 
         terr = constrain(0.28f + 0.14f * rMean + resid * 0.22f, 0.28f, 2.6f);
       }
     } else if (n.has1) {
-      float d1 = rssiToMeters(n.r1F, n.rawType);
+      float d1 = rssiToMeters(n.r1F, n.rawType, n.txPwr);
       float ang = idPhase * 2.1f - 1.25f;
       tx = -halfD + sinf(ang) * d1 * 0.68f;
-      tz = constrain(cosf(ang * 0.6f) * d1, 0.3f, D * 2.1f);
+      tz = constrain(cosf(ang * 0.6f) * d1, 0.3f, max(6.5f, D * 2.1f));
       terr = constrain(0.55f + d1 * 0.3f, 0.55f, 3.2f);
     } else {
-      float d2 = rssiToMeters(n.r2F, n.rawType);
+      float d2 = rssiToMeters(n.r2F, n.rawType, n.txPwr);
       float ang = idPhase * 2.1f - 0.85f;
       tx = halfD + sinf(ang) * d2 * 0.68f;
-      tz = constrain(cosf(ang * 0.6f) * d2, 0.3f, D * 2.1f);
+      tz = constrain(cosf(ang * 0.6f) * d2, 0.3f, max(6.5f, D * 2.1f));
       terr = constrain(0.55f + d2 * 0.3f, 0.55f, 3.2f);
     }
     rawTx[i] = tx; rawTz[i] = tz; rawErr[i] = terr;
@@ -517,7 +569,7 @@ static void recomputeNodes(uint32_t now) {
   s_matchedCnt = matched;
 
   // 5. Deterministic De-Clustering on target coordinates (before smoothing!)
-  const float minSep = constrain(D * 0.10f, 0.20f, 0.40f);
+  const float minSep = constrain(D * 0.14f, 0.32f, 0.52f);
   for (int pass = 0; pass < 2; pass++) {
     for (int i = 0; i < s_nNodes; i++) {
       for (int j = i + 1; j < s_nNodes; j++) {
@@ -529,17 +581,25 @@ static void recomputeNodes(uint32_t now) {
           // Angle derived deterministically from stable device IDs so it never flips
           float ang = (dist > 0.02f) ? atan2f(dz, dx) : (((s_nodes[i].id ^ s_nodes[j].id) % 360) * 0.017453f);
           float px = cosf(ang) * push, pz = sinf(ang) * push;
-          rawTx[i] -= px; rawTz[i] = max(0.22f, rawTz[i] - pz);
-          rawTx[j] += px; rawTz[j] = max(0.22f, rawTz[j] + pz);
+          bool pinI = (s_anchorId != 0 && s_nodes[i].id == s_anchorId);
+          bool pinJ = (s_anchorId != 0 && s_nodes[j].id == s_anchorId);
+          if (!pinI) { rawTx[i] -= px * (pinJ ? 1.8f : 1.0f); rawTz[i] = max(0.22f, rawTz[i] - pz * (pinJ ? 1.8f : 1.0f)); }
+          if (!pinJ) { rawTx[j] += px * (pinI ? 1.8f : 1.0f); rawTz[j] = max(0.22f, rawTz[j] + pz * (pinI ? 1.8f : 1.0f)); }
         }
       }
     }
   }
 
   // 6. Apply spatial deadband hysteresis + calm exponential glide
-  const float deadbandM = constrain(D * 0.065f, 0.15f, 0.30f);
+  const float deadbandM = constrain(D * 0.14f, 0.25f, 0.45f);
   for (int i = 0; i < s_nNodes; i++) {
     LocNode& n = s_nodes[i];
+    if (s_anchorId != 0 && n.id == s_anchorId && n.has1 && n.has2) {
+      n.targetX = n.x = 0.0f;
+      n.targetZ = n.z = s_anchorZ;
+      n.err = 0.15f;
+      continue;
+    }
     if (n.targetZ <= 0.01f) {
       n.targetX = n.x = rawTx[i];
       n.targetZ = n.z = rawTz[i];
@@ -604,6 +664,7 @@ void locJson(String& o) {
   o = "{\"on\":"; o += s_on ? 1 : 0;
   o += ",\"base\":"; o += String(s_baseM, 1);
   o += ",\"ofs\":"; o += s_offsetDb;
+  o += ",\"anchor\":"; o += s_anchorId;
   o += ",\"ear\":{\"ok\":"; o += earLive ? 1 : 0;
   o += ",\"bat\":"; o += s_earBat;
   o += ",\"usb\":"; o += (s_earFlags & 1) ? 1 : 0;

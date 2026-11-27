@@ -88,6 +88,10 @@ S.onBle = d => {
   for (const a of d.d) {
     const [id, r, type, vend, name, age, macs] = a; seen.add(id);
     const label = pickLabel(id, a.length > 7 ? a[7] : undefined);
+    const flags = a.length > 8 ? (+a[8] || 0) : 0;
+    const bat = a.length > 9 && a[9] >= 0 ? +a[9] : -1;
+    const info = a.length > 10 ? (a[10] || '') : '';
+    const tx = a.length > 11 && a[11] !== 127 ? +a[11] : null;
     let e = S.dev.get(id);
     if (!e) {
       // "new" = not seen earlier this session. A device that dropped out and came back (the stick does not send everyone at once,
@@ -100,7 +104,7 @@ S.onBle = d => {
       if (fresh) { actPush('ble', now); S.event('BLE', '+ ' + (label || name || type || 'device') + '  ' + r + ' dBm', S.isTrk(e) || S.isNew(e, now)); }
     }
     e.st.set(r);
-    Object.assign(e, { r, type, vend, name, label, age, macs, alive: true, seen: now });
+    Object.assign(e, { r, type, vend, name, label, age, macs, flags, bat, info, tx, alive: true, seen: now });
     e.hist.push(r); if (e.hist.length > 120) e.hist.shift();
   }
   for (const [id, e] of S.dev) if (!seen.has(id) && e.alive) e.alive = false;      // no "lost" in the feed: it flickers too often
